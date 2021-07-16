@@ -1,0 +1,12 @@
+[package]
+name = "atomicwrites"
+version = "0.1.0"
+
+[dependencies]
+tempfile = "3.1"
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.14.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winbase"] }

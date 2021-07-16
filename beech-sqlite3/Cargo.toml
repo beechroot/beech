@@ -1,0 +1,39 @@
+[package]
+name = "beech-sqlite3"
+version = "0.1.0"
+authors = ["Graham Miller <gmiller@amilarcap.com>"]
+build = "build.rs"
+publish = false
+license = "All rights reserved."
+description = "Beech core library"
+edition = "2018"
+
+
+[lib]
+name = "beech"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
+const-cstr = "0.1"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0.0"
+avro-rs = "0.8.0"
+log = "0.4.3"
+env_logger = "0.5.10"
+
+[dependencies.beech]
+path = "../rust/beech"
+features = ["curl"]
+
+
+[build-dependencies]
+bindgen = "0.53.1"
+cc = "1.0.66"
+
+[package.metadata.deb]
+assets = [
+    ["target/release/libbeech.so", "usr/local/lib/", "755"]
+]
+     

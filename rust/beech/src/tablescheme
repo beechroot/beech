@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "table",
+  "fields": [
+    {"name": "id", "type": "bytes"},
+    {"name": "name", "type": "string"},
+    {"name": "timestamp", "type": "long"},
+    {"name": "key_scheme", "type": "string"},
+    {"name": "record_scheme", "type": "string"},
+    {"name": "root", "type": ["bytes", "null"]},
+    {"name": "page_size_exp", "type": "int"}
+  ]
+}

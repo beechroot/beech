@@ -1,0 +1,8 @@
+{
+  "type": "record",
+  "name": "ground",
+  "fields": [
+    {"name": "id", "type": "bytes"},
+    {"name": "base", "type": "string"}
+  ]
+}

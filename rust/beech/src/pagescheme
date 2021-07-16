@@ -1,0 +1,11 @@
+{
+  "type": "record",
+  "name": "page",
+  "fields": [
+    {"name": "id", "type": "bytes"},
+    {"name": "keys", "type": "bytes"},
+    {"name": "rowids", "type":{"type":"array", "items":"long"}},
+    {"name": "rows", "type": "bytes"},
+    {"name": "children", "type":{"type":"array", "items":"bytes"}}
+  ]
+}
