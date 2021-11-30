@@ -1,7 +1,0 @@
-[package]
-name = "merge"
-version = "0.1.0"
-authors = ["gmilleramilar <gmiller@amilarcap.com>"]
-edition = "2018"
-
-[dependencies]

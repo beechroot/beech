@@ -24,7 +24,7 @@ log = "0.4.3"
 env_logger = "0.5.10"
 
 [dependencies.beech]
-path = "../rust/beech"
+path = "../beech"
 features = ["curl"]
 
 
