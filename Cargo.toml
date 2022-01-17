@@ -1,0 +1,10 @@
+[workspace]
+
+members = [
+    "beech-sqlite3",
+    "beech",
+    "lru-cache",
+    "posixmq-stream"
+]
+
+default-members = ["beech"]

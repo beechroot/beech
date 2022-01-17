@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "domain",
+  "fields": [
+    {"name": "id", "type": "bytes"},
+    {"name": "prev_id", "type": "bytes"},
+    {"name": "transaction_time", "type": "long"},
+    {"name": "tables", "type": {"type":"map", "values":"bytes"}}
+  ]
+}
