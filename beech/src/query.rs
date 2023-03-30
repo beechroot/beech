@@ -1,10 +1,10 @@
 use crate::source::Store;
 use crate::{BeechError, Id, Key, Page, Result, Table};
 use avro_rs::types::Value;
+use log::debug;
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
 use std::vec::Vec;
-use log::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConstraintOp {
@@ -43,7 +43,7 @@ pub struct OrdValue<'a>(pub &'a Value);
 impl<'a> Eq for OrdValue<'a> {}
 impl<'a> PartialEq for OrdValue<'a> {
     fn eq(&self, rhs: &Self) -> bool {
-        matches!(self.partial_cmp(rhs),Some(Ordering::Equal))
+        matches!(self.partial_cmp(rhs), Some(Ordering::Equal))
     }
 }
 impl<'a> Ord for OrdValue<'a> {
@@ -115,9 +115,7 @@ impl<'a> PartialOrd for OrdValue<'a> {
                 (Value::String(v0), Value::String(v1)) => Some(v0.cmp(v1)),
                 (Value::Fixed(sz0, v0), Value::Fixed(sz1, v1)) if sz0 == sz1 => Some(v0.cmp(v1)),
                 (Value::Enum(pos0, _), Value::Enum(pos1, _)) => Some(pos0.cmp(pos1)),
-                (Value::Union(bv0), Value::Union(bv1)) => {
-                    OrdValue(&**bv0).partial_cmp(&OrdValue(&**bv1))
-                }
+                (Value::Union(bv0), Value::Union(bv1)) => OrdValue(&**bv0).partial_cmp(&OrdValue(&**bv1)),
                 (_, _) => None,
             },
         }
@@ -172,24 +170,19 @@ impl Cursor {
     }
 
     pub fn init(&mut self, usage: IndexUsage, values: Vec<Value>) {
-        let mut constraints: Vec<Vec<(Constraint, Value)>> =
-            vec![Default::default(); self.table.key_size()];
+        let key_size = self.table.metadata.key_columns.len();
+        let mut constraints: Vec<Vec<(Constraint, Value)>> = vec![Default::default(); key_size];
         for (mut c, v) in usage.constraints.into_iter().zip(values).into_iter() {
-            if let Some(col) = self.table.column_key_part(c.column) {
+            if let Some(col) = self.table.metadata.column_key_part(c.column) {
                 c.has_index = true;
                 if let Some(slot) = constraints.get_mut(col) {
                     slot.push((c, v));
                 }
             }
         }
-	debug!("Cursor::init(): updated constraints {:?}", constraints);
         self.constraints = constraints;
         self.lower_bound = None;
-        self.stack = self
-            .table
-            .root
-            .as_ref()
-            .map_or(Vec::new(), |r| vec![(r.clone(), 0)]);
+        self.stack = self.table.root.as_ref().map_or(Vec::new(), |r| vec![(r.clone(), 0)]);
     }
 
     pub fn advance_to_right(&mut self, source: &mut dyn Store) -> Result<()> {
@@ -198,18 +191,18 @@ impl Cursor {
                 Some((id, _)) => {
                     let p = source.get_page(&self.table, &id)?;
                     match p {
-                        Page::Branch{children, ..} => {
-                            let next_child_idx = children.len()-1;
+                        Page::Branch { children, .. } => {
+                            let next_child_idx = children.len() - 1;
                             self.stack.push((id, next_child_idx));
                             self.stack.push((children[next_child_idx].clone(), 0))
-                        },
-                        Page::Leaf{values, ..} => {
-                            self.stack.push((id, values.len()-1));
-                            return Ok(())
-                        },
+                        }
+                        Page::Leaf { values, .. } => {
+                            self.stack.push((id, values.len() - 1));
+                            return Ok(());
+                        }
                     }
                 }
-                None => return Ok(())
+                None => return Ok(()),
             }
         }
     }
@@ -219,8 +212,7 @@ impl Cursor {
             if let Some(new_child) = self.find_next_child(p, *child) {
                 self.stack.push((id.clone(), new_child));
                 if let Page::Branch { children, .. } = p {
-                    let new_child_id =
-                        children.get(new_child).ok_or(BeechError::Corrupt)?;
+                    let new_child_id = children.get(new_child).ok_or(BeechError::Corrupt)?;
                     self.stack.push((new_child_id.clone(), 0));
                 } else {
                     break;
@@ -301,12 +293,12 @@ impl Cursor {
     // positive number counts up from the bottom of the stack
     pub fn stack_level(&self, lvl: isize) -> Option<&(Id, usize)> {
         if lvl <= 0 {
-	    let levels_down = (-1*lvl) as usize;
-	    if levels_down >= self.stack.len() {
-		None
-	    } else {
-		self.stack.get(self.stack.len() - levels_down as usize - 1)
-	    }
+            let levels_down = (-1 * lvl) as usize;
+            if levels_down >= self.stack.len() {
+                None
+            } else {
+                self.stack.get(self.stack.len() - levels_down as usize - 1)
+            }
         } else {
             self.stack.get(lvl as usize)
         }
@@ -339,13 +331,7 @@ impl Cursor {
             })
             .unwrap_or(1);
 
-        for (i, (cs, end_part)) in self
-            .constraints
-            .iter()
-            .take(in_order_depth)
-            .zip(k_end)
-            .enumerate()
-        {
+        for (i, (cs, end_part)) in self.constraints.iter().take(in_order_depth).zip(k_end).enumerate() {
             for (c, v) in cs {
                 if let Some(start_part) = maybe_k_start.and_then(|k_start| k_start.get(i)) {
                     if c.after_end(v, start_part) {
@@ -378,17 +364,13 @@ pub struct IndexUsage {
     constraints: Vec<Constraint>,
 }
 
-pub fn best_index(
-    table: &Table,
-    constraints: Vec<Constraint>,
-    order_bys: Vec<OrderBy>,
-) -> IndexUsage {
+pub fn best_index(table: &Table, constraints: Vec<Constraint>, order_bys: Vec<OrderBy>) -> IndexUsage {
     let order_by_columns: Vec<usize> = order_bys.iter().map(|ob| ob.column).collect();
-    let order_by_consumed = order_bys.iter().all(|ob| !ob.desc)
-        && table.key_column_indexes.starts_with(&order_by_columns);
+    let key_column_indexes: Vec<usize> = table.metadata.key_columns.iter().map(|(idx, _)| *idx).collect();
+    let order_by_consumed = order_bys.iter().all(|ob| !ob.desc) && key_column_indexes.starts_with(&order_by_columns);
     let usable_constraints = constraints
         .iter()
-        .any(|c| table.column_key_part(c.column).is_some());
+        .any(|c| table.metadata.column_key_part(c.column).is_some());
     let estimated_cost = if usable_constraints {
         512.0
     } else {

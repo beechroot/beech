@@ -1,15 +1,15 @@
 use super::{BeechError, Result, DOMAIN_SCHEME, GROUND_SCHEME, PAGE_SCHEME, TABLE_SCHEME};
 
-use crate::{Domain, Page, Table};
+use crate::wire;
 use crate::wire::Ground;
 use crate::Id;
+use crate::{Domain, Page, Table, TableMetadata};
 use avro_rs::{from_avro_datum, from_value};
-use std::convert::TryInto;
+use log::info;
 #[cfg(feature = "curl")]
 use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::time::{Duration, Instant};
-use crate::wire;
-use log::info;
 
 enum Cacheable {
     Table(Table),
@@ -58,11 +58,7 @@ pub struct CachedStore<F: ByteFetcher> {
 }
 
 impl<F: ByteFetcher> CachedStore<F> {
-    pub fn new(
-        cache_size: usize,
-        fetch_interval: Option<Duration>,
-        fetcher: F,
-    ) -> Result<CachedStore<F>> {
+    pub fn new(cache_size: usize, fetch_interval: Option<Duration>, fetcher: F) -> Result<CachedStore<F>> {
         Ok(CachedStore {
             cache: lru_cache::LruCache::new(cache_size),
             fetch_interval,
@@ -72,7 +68,7 @@ impl<F: ByteFetcher> CachedStore<F> {
     }
 
     pub fn into_fetcher(self) -> F {
-	self.fetcher
+        self.fetcher
     }
 
     fn maybe_fetch_new_ground(&mut self, now: Instant) -> Result<Option<Ground>> {
@@ -99,7 +95,7 @@ impl<F: ByteFetcher> CachedStore<F> {
 
     pub fn get_table_id(&mut self, name: &str) -> Result<Id> {
         let (domain, _) = self.get_domain()?;
-	domain
+        domain
             .tables
             .get(name)
             .cloned()
@@ -111,14 +107,12 @@ impl<F: ByteFetcher> Store for CachedStore<F> {
         let now = Instant::now();
         let maybe_new_ground = self.maybe_fetch_new_ground(now)?;
         if let Some(new_ground) = maybe_new_ground {
-	    let dat_file = format!("{}.dat", new_ground.id);
-	    info!("{}: fetching", dat_file);
-	    assert!(dat_file != ".dat");
-            let mut domain_r = self
-                .fetcher
-                .get_reader(Some(&dat_file))?;
+            let dat_file = format!("{}.dat", new_ground.id);
+            info!("{}: fetching", dat_file);
+            assert!(dat_file != ".dat");
+            let mut domain_r = self.fetcher.get_reader(Some(&dat_file))?;
             let wire_domain = wire::Domain::read(&mut domain_r, &DOMAIN_SCHEME)?;
-	    let domain = (&wire_domain).try_into()?;
+            let domain = (&wire_domain).try_into()?;
             self.cached_ground_data = Some((now, new_ground, domain));
         }
         if let Some(cached_data) = self.cached_ground_data.as_mut() {
@@ -133,12 +127,14 @@ impl<F: ByteFetcher> Store for CachedStore<F> {
         let id = self.get_table_id(name)?;
         let cached = self.cache.contains_key(&id);
         if !cached {
-	    let dat_file = format!("{}.dat", &id);
-	    info!("{}: fetching", dat_file);
-	    assert!(dat_file != ".dat");
+            let dat_file = format!("{}.dat", &id);
+            info!("{}: fetching", dat_file);
+            assert!(dat_file != ".dat");
             let mut r = self.fetcher.get_reader(Some(&dat_file))?;
             let wire_table = wire::Table::read(&mut r, &TABLE_SCHEME)?;
-            let table: Table = (&wire_table).try_into()?;
+            let metadata: TableMetadata =
+                (wire_table.key_scheme.as_str(), wire_table.record_scheme.as_str()).try_into()?;
+            let table: Table = (&wire_table, metadata).try_into()?;
 
             self.cache.insert(id.clone(), Cacheable::Table(table));
         }
@@ -149,12 +145,12 @@ impl<F: ByteFetcher> Store for CachedStore<F> {
     }
     fn get_page(&mut self, t: &Table, id: &Id) -> Result<&Page> {
         if !self.cache.contains_key(id) {
-	    let dat_file = format!("{}.dat", id);
-	    info!("{}: fetching", dat_file);
-	    assert!(dat_file != ".dat");
+            let dat_file = format!("{}.dat", id);
+            info!("{}: fetching", dat_file);
+            assert!(dat_file != ".dat");
             let mut r = self.fetcher.get_reader(Some(&dat_file))?;
             let wire_page = wire::Page::read(&mut r, &PAGE_SCHEME)?;
-            let page: Page = t.from_wire_page(&wire_page)?;
+            let page: Page = (&wire_page, &t.metadata).try_into()?;
 
             self.cache.insert(id.clone(), Cacheable::Page(page));
         }
@@ -189,7 +185,6 @@ impl ByteFetcher for FileFetcher {
     }
 }
 
-
 #[cfg(feature = "curl")]
 pub struct HttpFetcher(url::Url);
 
@@ -208,7 +203,6 @@ impl ByteFetcher for HttpFetcher {
         let u = file_name
             .map(|n| self.0.join(n))
             .unwrap_or_else(|| self.0.join("ground"))?;
-        crate::http::get(&u)
-            .map(|(_, data)| Box::new(std::io::Cursor::new(data)) as Box<dyn std::io::Read>)
+        crate::http::get(&u).map(|(_, data)| Box::new(std::io::Cursor::new(data)) as Box<dyn std::io::Read>)
     }
 }
