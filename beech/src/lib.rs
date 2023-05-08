@@ -1,3 +1,4 @@
+use lru_cache::Sizer;
 pub use serde;
 #[macro_use]
 extern crate serde_derive;
@@ -10,15 +11,16 @@ pub mod wire;
 use std::collections::HashMap;
 use std::fmt;
 
-use avro_rs::types::Value;
-use avro_rs::{to_avro_datum, Schema};
+use apache_avro::types::Value;
+use apache_avro::{to_avro_datum, Schema};
 
-use failure::Error;
-use failure_derive::Fail;
 use lazy_static::*;
 use serde_bytes::ByteBuf;
 use std::convert::{TryFrom, TryInto};
 use std::time::*;
+
+use anyhow::Result;
+use thiserror::Error;
 
 #[derive(Serialize, Deserialize, std::hash::Hash, Default, Clone, PartialEq)]
 pub struct Id(ByteBuf);
@@ -79,23 +81,23 @@ impl std::convert::AsRef<[u8]> for Id {
     }
 }
 
-#[derive(Debug, Fail)]
+#[derive(Debug, Error)]
 pub enum BeechError {
-    #[fail(display = "nonzero sqlite3 result code: {}", code)]
+    #[error("nonzero sqlite3 result code: {}", code)]
     Sqlite3 { code: i32 },
-    #[fail(display = "done")]
+    #[error("done")]
     Done,
-    #[fail(display = "invalid argument(s)")]
+    #[error("invalid argument(s)")]
     Args,
-    #[fail(display = "corrupt database")]
+    #[error("corrupt database")]
     Corrupt,
-    #[fail(display = "HTTP result code :{}", code)]
+    #[error("HTTP result code :{}", code)]
     Http { code: i32 },
-    #[fail(display = "unknown network failure")]
+    #[error("unknown network failure")]
     Network,
-    #[fail(display = "schema changed during query processing")]
+    #[error("schema changed during query processing")]
     SchemaMismatch,
-    #[fail(display = "no such table")]
+    #[error("no such table")]
     NoSuchTable,
 }
 
@@ -109,8 +111,6 @@ lazy_static! {
     pub static ref GROUND_SCHEME: Schema =
         Schema::parse(&serde_json::from_str(include_str!("groundscheme")).unwrap()).unwrap();
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 pub type Row = (i64, Vec<Value>);
 pub type Key = Vec<Value>; //column number and value
@@ -146,9 +146,9 @@ pub struct Table {
 
 #[derive(Debug, Clone)]
 pub struct TableMetadata {
-    pub key_scheme: avro_rs::Schema,
+    pub key_scheme: apache_avro::Schema,
     pub key_scheme_text: String,
-    pub record_scheme: avro_rs::Schema,
+    pub record_scheme: apache_avro::Schema,
     pub record_scheme_text: String,
     pub key_columns: Vec<(usize, Column)>,
     columns: Vec<Column>,
@@ -219,7 +219,7 @@ fn read_field(v: &serde_json::Value) -> Option<(String, String)> {
     }
 }
 
-pub fn scheme_from_fields(scheme: &str) -> Result<(serde_json::Value, avro_rs::Schema)> {
+pub fn scheme_from_fields(scheme: &str) -> Result<(serde_json::Value, apache_avro::Schema)> {
     let str_scheme = format!(
         r#"
 {{
@@ -237,7 +237,8 @@ pub fn scheme_from_fields(scheme: &str) -> Result<(serde_json::Value, avro_rs::S
 }
 
 impl TryFrom<(&str, &str)> for TableMetadata {
-    type Error = Error;
+    type Error = anyhow::Error;
+
     fn try_from((key_scheme_text, record_scheme_text): (&str, &str)) -> std::result::Result<Self, Self::Error> {
         let (key_json_scheme, key_scheme) = scheme_from_fields(key_scheme_text)?;
         let (record_json_scheme, record_scheme) = scheme_from_fields(record_scheme_text)?;
@@ -297,7 +298,7 @@ impl TryFrom<(&str, &str)> for TableMetadata {
 }
 
 impl TryFrom<&wire::Domain> for Domain {
-    type Error = Error;
+    type Error = anyhow::Error;
     fn try_from(wd: &wire::Domain) -> std::result::Result<Self, Self::Error> {
         let timestamp = UNIX_EPOCH + Duration::from_micros(wd.transaction_time as u64);
         Ok(Domain {
@@ -347,7 +348,7 @@ pub fn rehydrate_keys(key_columns: &[(usize, Column)], values: &[Value]) -> Resu
 }
 
 impl TryFrom<(&wire::Table, TableMetadata)> for Table {
-    type Error = Error;
+    type Error = anyhow::Error;
 
     fn try_from((wt, metadata): (&wire::Table, TableMetadata)) -> Result<Self> {
         Ok(Table {
@@ -373,7 +374,7 @@ impl TableMetadata {
     }
 }
 impl TryInto<wire::Page> for (&Page, Id, &TableMetadata) {
-    type Error = Error;
+    type Error = anyhow::Error;
 
     fn try_into(self) -> Result<wire::Page> {
         let (page, page_id, metadata) = self;
@@ -408,7 +409,7 @@ impl TryInto<wire::Page> for (&Page, Id, &TableMetadata) {
 }
 
 impl TryFrom<(&wire::Page, &TableMetadata)> for Page {
-    type Error = Error;
+    type Error = anyhow::Error;
 
     fn try_from((wire_page, metadata): (&wire::Page, &TableMetadata)) -> Result<Self> {
         let is_leaf = wire_page.children.is_empty();
@@ -437,7 +438,7 @@ impl TryFrom<(&wire::Page, &TableMetadata)> for Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use avro_rs::{from_avro_datum, from_value, to_avro_datum, to_value};
+    use apache_avro::{from_avro_datum, from_value, to_avro_datum, to_value};
 
     #[test]
     fn serialize_round_trip() {
@@ -463,5 +464,20 @@ mod tests {
         let rehy_domain: wire::Domain =
             from_value(&from_avro_datum(&DOMAIN_SCHEME, &mut &domain_bytes[..], None).unwrap()).unwrap();
         assert_eq!(rehy_domain.id, 99.into());
+    }
+}
+
+impl Sizer for Page {
+    fn size(&self) -> usize {
+        match self {
+            Page::Leaf { values, .. } => 1024,
+            Page::Branch { keys, .. } => 1024,
+        }
+    }
+}
+
+impl Sizer for Table {
+    fn size(&self) -> usize {
+        1024
     }
 }

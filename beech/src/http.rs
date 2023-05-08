@@ -1,9 +1,10 @@
 #![cfg(feature = "curl")]
+use anyhow::Result;
 use curl::easy::Easy;
 use std::thread;
 use std::time::Duration;
 
-pub fn get(u: &url::Url) -> Result<(u32, Vec<u8>), crate::Error> {
+pub fn get(u: &url::Url) -> Result<(u32, Vec<u8>)> {
     let mut data = Vec::new();
 
     let mut backoff = Duration::from_millis(10);

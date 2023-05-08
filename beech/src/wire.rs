@@ -2,8 +2,8 @@ use super::*;
 use std::collections::HashMap;
 use std::mem::size_of;
 
-use avro_rs::types::Value;
-use avro_rs::{from_avro_datum, from_value, Schema};
+use apache_avro::types::Value;
+use apache_avro::{from_avro_datum, Schema};
 
 use serde_derive::{Deserialize, Serialize};
 use std::io;
@@ -44,18 +44,7 @@ pub struct Page {
     pub children: Vec<Id>,
 }
 
-impl Domain {
-    pub fn read<R: io::Read>(r: &mut R, scheme: &avro_rs::Schema) -> Result<Domain> {
-        let next_result = avro_rs::from_avro_datum(scheme, r, None)?;
-        Ok(from_value::<wire::Domain>(&next_result)?)
-    }
-}
-
 impl Table {
-    pub fn read<R: io::Read>(r: &mut R, scheme: &avro_rs::Schema) -> Result<Table> {
-        let next_result = avro_rs::from_avro_datum(scheme, r, None)?;
-        Ok(from_value::<wire::Table>(&next_result)?)
-    }
     pub fn data_size(&self) -> usize {
         self.name.len() + self.key_scheme.len() + self.record_scheme.len()
     }
@@ -71,11 +60,6 @@ pub fn value_array_contents<R: io::Read>(scheme: &Schema, rd: &mut R) -> Result<
 }
 
 impl Page {
-    pub fn read<R: io::Read>(r: &mut R, scheme: &avro_rs::Schema) -> Result<Page> {
-        let next_result = avro_rs::from_avro_datum(scheme, r, None)?;
-        Ok(from_value::<wire::Page>(&next_result)?)
-    }
-
     pub fn data_size(&self) -> usize {
         self.keys.len()
             + (self.rowids.len() * size_of::<i64>())

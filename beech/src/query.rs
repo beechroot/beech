@@ -1,6 +1,6 @@
 use crate::source::Store;
 use crate::{BeechError, Id, Key, Page, Result, Table};
-use avro_rs::types::Value;
+use apache_avro::types::Value;
 use log::debug;
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
@@ -115,7 +115,6 @@ impl<'a> PartialOrd for OrdValue<'a> {
                 (Value::String(v0), Value::String(v1)) => Some(v0.cmp(v1)),
                 (Value::Fixed(sz0, v0), Value::Fixed(sz1, v1)) if sz0 == sz1 => Some(v0.cmp(v1)),
                 (Value::Enum(pos0, _), Value::Enum(pos1, _)) => Some(pos0.cmp(pos1)),
-                (Value::Union(bv0), Value::Union(bv1)) => OrdValue(&**bv0).partial_cmp(&OrdValue(&**bv1)),
                 (_, _) => None,
             },
         }
@@ -185,12 +184,12 @@ impl Cursor {
         self.stack = self.table.root.as_ref().map_or(Vec::new(), |r| vec![(r.clone(), 0)]);
     }
 
-    pub fn advance_to_right(&mut self, source: &mut dyn Store) -> Result<()> {
+    pub fn advance_to_right(&mut self, source: &impl Store) -> Result<()> {
         loop {
             match self.stack.pop() {
                 Some((id, _)) => {
-                    let p = source.get_page(&self.table, &id)?;
-                    match p {
+                    let p = source.get_page(&id, &self.table.metadata)?;
+                    match &*p {
                         Page::Branch { children, .. } => {
                             let next_child_idx = children.len() - 1;
                             self.stack.push((id, next_child_idx));
@@ -206,12 +205,12 @@ impl Cursor {
             }
         }
     }
-    pub fn advance_to_left(&mut self, source: &mut dyn Store) -> Result<()> {
+    pub fn advance_to_left(&mut self, source: &impl Store) -> Result<()> {
         while let Some((id, child)) = &self.stack.pop() {
-            let p = source.get_page(&self.table, &id)?;
-            if let Some(new_child) = self.find_next_child(p, *child) {
+            let p = source.get_page(&id, &self.table.metadata)?;
+            if let Some(new_child) = self.find_next_child(&*p, *child) {
                 self.stack.push((id.clone(), new_child));
-                if let Page::Branch { children, .. } = p {
+                if let Page::Branch { children, .. } = &*p {
                     let new_child_id = children.get(new_child).ok_or(BeechError::Corrupt)?;
                     self.stack.push((new_child_id.clone(), 0));
                 } else {
@@ -249,12 +248,12 @@ impl Cursor {
         }
     }
 
-    fn advance_stack(&mut self, source: &mut dyn Store) -> Result<()> {
+    fn advance_stack(&mut self, source: &impl Store) -> Result<()> {
         while !self.stack.is_empty() {
             match &self.stack.pop() {
                 Some((id, child)) => {
                     let (last_child, new_lower_bound) = {
-                        let p = source.get_page(&self.table, &id)?;
+                        let p = source.get_page(&id, &self.table.metadata)?;
                         (p.last_child(), p.keys().get(*child).cloned())
                     };
                     self.lower_bound = new_lower_bound;
@@ -270,11 +269,11 @@ impl Cursor {
         Ok(())
     }
 
-    pub fn next(&mut self, source: &mut dyn Store) -> Result<()> {
+    pub fn next(&mut self, source: &impl Store) -> Result<()> {
         self.advance_stack(source)?;
         self.advance_to_left(source)?;
         if let Some((id, child)) = &self.stack.last() {
-            let p = source.get_page(&self.table, &id)?;
+            let p = source.get_page(&id, &self.table.metadata)?;
 
             let maybe_key = p.keys().get(*child);
             if let Some(key) = maybe_key {

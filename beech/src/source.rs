@@ -1,208 +1,127 @@
-use super::{BeechError, Result, DOMAIN_SCHEME, GROUND_SCHEME, PAGE_SCHEME, TABLE_SCHEME};
+use super::{BeechError, DOMAIN_SCHEME, GROUND_SCHEME, PAGE_SCHEME, TABLE_SCHEME};
 
 use crate::wire;
 use crate::wire::Ground;
 use crate::Id;
 use crate::{Domain, Page, Table, TableMetadata};
-use avro_rs::{from_avro_datum, from_value};
-use log::info;
-#[cfg(feature = "curl")]
-use std::convert::TryFrom;
+use anyhow::Result;
+use apache_avro::types::Value;
+use apache_avro::{from_avro_datum, from_value};
+use std::cell::RefCell;
 use std::convert::TryInto;
-use std::time::{Duration, Instant};
-
-enum Cacheable {
-    Table(Table),
-    Page(Page),
-}
-
-impl Cacheable {
-    fn as_table(&self) -> Option<&Table> {
-        if let Cacheable::Table(t) = self {
-            Some(t)
-        } else {
-            None
-        }
-    }
-    fn as_page(&self) -> Option<&Page> {
-        if let Cacheable::Page(p) = self {
-            Some(p)
-        } else {
-            None
-        }
-    }
-}
-
-impl lru_cache::Sizer for Cacheable {
-    fn size(&self) -> usize {
-        //TODO:
-        1024
-    }
-}
-
-pub trait ByteFetcher {
-    fn get_reader<'a>(&'a self, file_name: Option<&str>) -> Result<Box<dyn std::io::Read + 'a>>;
-}
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub trait Store {
-    fn get_domain(&mut self) -> Result<(&Domain, &str)>;
-    fn get_table(&mut self, name: &str) -> Result<&Table>;
-    fn get_page(&mut self, t: &Table, id: &Id) -> Result<&Page>;
+    fn get_domain(&self) -> Result<Arc<Domain>>;
+    fn get_table(&self, name: &str) -> Result<Arc<Table>>;
+    fn get_page(&self, id: &Id, metadata: &TableMetadata) -> Result<Arc<Page>>;
 }
 
-pub struct CachedStore<F: ByteFetcher> {
-    cache: lru_cache::LruCache<Id, Cacheable>,
-    fetch_interval: Option<Duration>,
-    cached_ground_data: Option<(Instant, Ground, Domain)>,
-    fetcher: F,
+pub struct CachedStore<F>
+where
+    F: Fn(Option<&Id>, &apache_avro::Schema) -> Result<Value>,
+{
+    page_cache: RefCell<lru_cache::LruCache<Id, Arc<Page>>>,
+    table_cache: RefCell<lru_cache::LruCache<Id, Arc<Table>>>,
+    fetch: F,
 }
 
-impl<F: ByteFetcher> CachedStore<F> {
-    pub fn new(cache_size: usize, fetch_interval: Option<Duration>, fetcher: F) -> Result<CachedStore<F>> {
+impl<F> CachedStore<F>
+where
+    F: Fn(Option<&Id>, &apache_avro::Schema) -> Result<Value>,
+{
+    pub fn new(cache_size: usize, fetcher: F) -> Result<CachedStore<F>> {
         Ok(CachedStore {
-            cache: lru_cache::LruCache::new(cache_size),
-            fetch_interval,
-            cached_ground_data: None,
-            fetcher,
+            page_cache: RefCell::new(lru_cache::LruCache::new(cache_size)),
+            table_cache: RefCell::new(lru_cache::LruCache::new(cache_size)),
+            fetch: fetcher,
         })
     }
 
-    pub fn into_fetcher(self) -> F {
-        self.fetcher
+    fn fetch_ground(&self) -> Result<Ground> {
+        let aval = (self.fetch)(None, &GROUND_SCHEME)?;
+        Ok(from_value::<Ground>(&aval)?)
     }
 
-    fn maybe_fetch_new_ground(&mut self, now: Instant) -> Result<Option<Ground>> {
-        let old_ground = match (self.cached_ground_data.as_ref(), self.fetch_interval) {
-            (None, _) => None,
-            (Some((last, ground, _)), Some(intv)) => {
-                if now < *last + intv {
-                    return Ok(None);
-                } else {
-                    Some(ground)
-                }
-            }
-            (_, None) => return Ok(None),
-        };
-
-        let mut r = self.fetcher.get_reader(None)?;
-        let latest_ground = from_value::<Ground>(&from_avro_datum(&GROUND_SCHEME, &mut r, None)?)?;
-        if Some(&latest_ground) == old_ground {
-            Ok(None)
-        } else {
-            Ok(Some(latest_ground))
-        }
-    }
-
-    pub fn get_table_id(&mut self, name: &str) -> Result<Id> {
-        let (domain, _) = self.get_domain()?;
+    fn get_table_id(&self, name: &str) -> Result<Id> {
+        let domain = self.get_domain()?;
         domain
+            .as_ref()
             .tables
             .get(name)
             .cloned()
-            .ok_or_else(|| -> failure::Error { BeechError::Corrupt.into() })
-    }
-}
-impl<F: ByteFetcher> Store for CachedStore<F> {
-    fn get_domain(&mut self) -> Result<(&Domain, &str)> {
-        let now = Instant::now();
-        let maybe_new_ground = self.maybe_fetch_new_ground(now)?;
-        if let Some(new_ground) = maybe_new_ground {
-            let dat_file = format!("{}.dat", new_ground.id);
-            info!("{}: fetching", dat_file);
-            assert!(dat_file != ".dat");
-            let mut domain_r = self.fetcher.get_reader(Some(&dat_file))?;
-            let wire_domain = wire::Domain::read(&mut domain_r, &DOMAIN_SCHEME)?;
-            let domain = (&wire_domain).try_into()?;
-            self.cached_ground_data = Some((now, new_ground, domain));
-        }
-        if let Some(cached_data) = self.cached_ground_data.as_mut() {
-            cached_data.0 = now;
-            Ok((&cached_data.2, cached_data.1.base.as_str()))
-        } else {
-            Err(BeechError::Corrupt.into())
-        }
+            .ok_or(BeechError::Corrupt.into())
     }
 
-    fn get_table(&mut self, name: &str) -> Result<&Table> {
+    pub fn get_domain(&self) -> Result<Arc<Domain>> {
+        let ground = self.fetch_ground()?;
+        let adomain = (self.fetch)(Some(&ground.id), &DOMAIN_SCHEME)?;
+        let wire_domain = from_value::<wire::Domain>(&adomain)?;
+        let domain = (&wire_domain).try_into()?;
+        Ok(Arc::new(domain))
+    }
+
+    pub fn get_table(&self, name: &str) -> Result<Arc<Table>> {
         let id = self.get_table_id(name)?;
-        let cached = self.cache.contains_key(&id);
-        if !cached {
-            let dat_file = format!("{}.dat", &id);
-            info!("{}: fetching", dat_file);
-            assert!(dat_file != ".dat");
-            let mut r = self.fetcher.get_reader(Some(&dat_file))?;
-            let wire_table = wire::Table::read(&mut r, &TABLE_SCHEME)?;
+        if !self.table_cache.borrow_mut().contains_key(&id) {
+            let atable = (self.fetch)(Some(&id), &TABLE_SCHEME)?;
+            let wire_table = from_value::<wire::Table>(&atable)?;
             let metadata: TableMetadata =
                 (wire_table.key_scheme.as_str(), wire_table.record_scheme.as_str()).try_into()?;
             let table: Table = (&wire_table, metadata).try_into()?;
+            let arc_table = Arc::new(table);
 
-            self.cache.insert(id.clone(), Cacheable::Table(table));
+            self.table_cache.borrow_mut().insert(id.clone(), arc_table.clone());
+            return Ok(arc_table);
         }
-        self.cache
+        self.table_cache
+            .borrow_mut()
             .get_mut(&id)
-            .and_then(|x| x.as_table())
+            .map(|a| a.clone())
             .ok_or_else(|| BeechError::NoSuchTable.into())
     }
-    fn get_page(&mut self, t: &Table, id: &Id) -> Result<&Page> {
-        if !self.cache.contains_key(id) {
-            let dat_file = format!("{}.dat", id);
-            info!("{}: fetching", dat_file);
-            assert!(dat_file != ".dat");
-            let mut r = self.fetcher.get_reader(Some(&dat_file))?;
-            let wire_page = wire::Page::read(&mut r, &PAGE_SCHEME)?;
-            let page: Page = (&wire_page, &t.metadata).try_into()?;
 
-            self.cache.insert(id.clone(), Cacheable::Page(page));
+    pub fn get_page(&self, id: &Id, metadata: &TableMetadata) -> Result<Arc<Page>> {
+        if !self.page_cache.borrow_mut().contains_key(id) {
+            let apage = (self.fetch)(Some(id), &PAGE_SCHEME)?;
+            let wire_page = from_value::<wire::Page>(&apage)?;
+            let page: Page = (&wire_page, metadata).try_into()?;
+            let arc_page = Arc::new(page);
+
+            self.page_cache.borrow_mut().insert(id.clone(), arc_page.clone());
+            return Ok(arc_page);
         }
-        self.cache
+        self.page_cache
+            .borrow_mut()
             .get_mut(id)
-            .and_then(|x| x.as_page())
+            .map(|a| a.clone())
             .ok_or_else(|| BeechError::Corrupt.into())
     }
 }
 
-pub struct FileFetcher(std::path::PathBuf);
-
-impl<S> From<S> for FileFetcher
-where
-    S: ToString,
-{
-    fn from(s: S) -> Self {
-        FileFetcher(std::path::PathBuf::from(s.to_string()))
+pub fn fetch_file_value(pb: &PathBuf, maybe_id: Option<&Id>, scheme: &apache_avro::Schema) -> Result<Value> {
+    let mut pb = pb.clone();
+    if let Some(id) = maybe_id {
+        pb.push(id.to_string());
+        pb.push(".dat");
+    } else {
+        pb.push("ground");
     }
-}
-
-impl ByteFetcher for FileFetcher {
-    fn get_reader(&self, file_name: Option<&str>) -> Result<Box<dyn std::io::Read>> {
-        let mut pb = self.0.clone();
-        if let Some(name) = file_name {
-            pb.push(name)
-        } else {
-            pb.push("ground")
-        }
-        let f = std::fs::File::open(pb)?;
-        Ok(Box::new(f) as Box<dyn std::io::Read>)
-    }
+    let mut f = std::fs::File::open(pb)?;
+    Ok(from_avro_datum(scheme, &mut f, None)?)
 }
 
 #[cfg(feature = "curl")]
-pub struct HttpFetcher(url::Url);
+pub fn fetch_http_value(url_base: &url::Url, maybe_id: Option<&Id>, scheme: &apache_avro::Schema) -> Result<Value> {
+    let u = if let Some(id) = maybe_id {
+        url_base.join((id.to_string() + ".dat").as_str())?
+    } else {
+        url_base.join("ground")?
+    };
 
-#[cfg(feature = "curl")]
-impl TryFrom<&str> for HttpFetcher {
-    type Error = failure::Error;
-    fn try_from(s: &str) -> std::result::Result<Self, Self::Error> {
-        let url = url::Url::parse(s)?;
-        Ok(HttpFetcher(url))
-    }
-}
-
-#[cfg(feature = "curl")]
-impl ByteFetcher for HttpFetcher {
-    fn get_reader(&self, file_name: Option<&str>) -> Result<Box<dyn std::io::Read>> {
-        let u = file_name
-            .map(|n| self.0.join(n))
-            .unwrap_or_else(|| self.0.join("ground"))?;
-        crate::http::get(&u).map(|(_, data)| Box::new(std::io::Cursor::new(data)) as Box<dyn std::io::Read>)
-    }
+    crate::http::get(&u).and_then(|(_, data)| {
+        let mut cursor = std::io::Cursor::new(data);
+        Ok(from_avro_datum(scheme, &mut cursor, None)?)
+    })
 }
