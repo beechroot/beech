@@ -43,6 +43,7 @@ use std::collections::hash_map::RandomState;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::mem::size_of;
+use std::sync::Arc;
 
 use linked_hash_map::LinkedHashMap;
 
@@ -63,6 +64,15 @@ impl Sizer for i32 {
 impl<'a> Sizer for &'a str {
     fn size(&self) -> usize {
         size_of::<&'a str>() + self.len()
+    }
+}
+
+impl<T> Sizer for Arc<T>
+where
+    T: Sizer,
+{
+    fn size(&self) -> usize {
+        self.as_ref().size()
     }
 }
 
@@ -641,10 +651,7 @@ mod tests {
         cache.insert(3, 30);
         cache.insert(4, 40);
         cache.insert(5, 50);
-        assert_eq!(
-            cache.iter().collect::<Vec<_>>(),
-            [(&3, &30), (&4, &40), (&5, &50)]
-        );
+        assert_eq!(cache.iter().collect::<Vec<_>>(), [(&3, &30), (&4, &40), (&5, &50)]);
         assert_eq!(
             cache.iter_mut().collect::<Vec<_>>(),
             [(&3, &mut 30), (&4, &mut 40), (&5, &mut 50)]
@@ -678,5 +685,4 @@ mod tests {
         assert!(cache.get_mut(&1).is_none());
         assert_eq!(cache.get_mut(&2), Some(&mut 20));
     }
-
 }
