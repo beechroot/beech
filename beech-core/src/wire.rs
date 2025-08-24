@@ -1,4 +1,4 @@
-use crate::{err_corrupt, Id, Page, Result, Root, Table, Transaction};
+use crate::{BeechError, Id, Page, Result, Root, Table, Transaction};
 use apache_avro::schema::{ArraySchema, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::{AvroSchema, Schema, from_avro_datum, from_value, to_avro_datum, to_value};
@@ -117,13 +117,13 @@ fn encode_record_array<W: Write>(
     values: &[Vec<Value>],
 ) -> Result<()> {
     let Schema::Record(RecordSchema { fields, .. }) = scheme else {
-        return Err(err_corrupt("expected record schema while encoding record array"));
+        return Err(BeechError::Corrupt("expected record schema while encoding record array".to_string()));
     };
     let records: Result<Vec<_>> = values
         .iter()
         .map(|row| {
             if row.len() != fields.len() {
-                return Err(err_corrupt("expected record with matching number of fields"));
+                return Err(BeechError::Corrupt("expected record with matching number of fields".to_string()));
             }
             Ok(Value::Record(
                 fields
@@ -174,7 +174,7 @@ pub fn encode_page(
 
 fn try_from_array(value: Value) -> Result<Vec<Value>> {
     let Value::Array(values) = value else {
-        return Err(err_corrupt("expected array"));
+        return Err(BeechError::Corrupt("expected array".to_string()));
     };
     Ok(values)
 }
@@ -192,7 +192,7 @@ fn decode_record_array(scheme: &Schema, data: &[u8]) -> Result<Vec<Vec<Value>>> 
         .into_iter()
         .map(|value| {
             let Value::Record(record) = value else {
-                return Err(err_corrupt("expected record while decoding record array"));
+                return Err(BeechError::Corrupt("expected record while decoding record array".to_string()));
             };
             Ok(record.into_iter().map(|(_name, value)| value).collect())
         })
@@ -210,7 +210,7 @@ pub fn decode_page<R: Read>(
     if is_leaf {
         let rows = decode_record_array(row_scheme, &wp.rows[..])?;
         if rows.len() != wp.rowids.len() {
-            return Err(err_corrupt("expected matching number of rows and rowids"));
+            return Err(BeechError::Corrupt("expected matching number of rows and rowids".to_string()));
         }
         let key_columns: Vec<usize> = find_key_columns(key_scheme, row_scheme)?;
         let keys: Vec<Vec<_>> = rows
@@ -225,7 +225,7 @@ pub fn decode_page<R: Read>(
     } else {
         let keys: Vec<Vec<_>> = decode_record_array(key_scheme, &wp.keys[..])?;
         if keys.len() + 1 != wp.children.len() {
-            return Err(err_corrupt("expected congruent number of keys and children"));
+            return Err(BeechError::Corrupt("expected congruent number of keys and children".to_string()));
         }
         Ok(Page::Branch {
             keys,
@@ -253,7 +253,7 @@ pub fn find_key_columns(key_scheme: &Schema, row_scheme: &Schema) -> Result<Vec<
                     .position(|f| f.name == field.name)
             })
             .collect(),
-        _ => return Err(err_corrupt("expected record schema while finding key columns")),
+        _ => return Err(BeechError::SchemaMismatch("expected record schema while finding key columns".to_string())),
     };
     Ok(key_columns)
 }

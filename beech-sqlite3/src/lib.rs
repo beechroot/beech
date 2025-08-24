@@ -344,7 +344,7 @@ impl BeechCursor {
 
         // Check schema compatibility
         if index_usage.table_id != self.cursor.table.id {
-            return Err(BeechError::SchemaMismatch);
+            return Err(BeechError::SchemaMismatch("table schema mismatch".to_string()));
         }
         debug!("beech_filter(): schema matches");
 

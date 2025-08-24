@@ -1,5 +1,5 @@
 
-use crate::{err_corrupt, BeechError, Id, Key, NodeSource, Page, Result, Table};
+use crate::{BeechError, Id, Key, NodeSource, Page, Result, Table};
 use apache_avro::types::Value;
 use apache_avro::AvroSchema;
 use ordered_float::OrderedFloat;
@@ -301,7 +301,7 @@ impl Cursor {
                         break;
                     }
                 }
-                None => return Err(err_corrupt("empty stack")),
+                None => return Err(BeechError::InternalError("empty stack".to_string())),
             }
         }
 

@@ -4,7 +4,7 @@ use apache_avro::{
     types::Value,
 };
 use beech_core::{
-    Id, Key, KeyOrdering, NodeSource, Page, Root, Row, Table, Transaction,
+    BeechError, Id, Key, KeyOrdering, NodeSource, Page, Result, Root, Row, Table, Transaction,
     query::{Constraint, ConstraintOp, Cursor},
     wire::{encode_page, encode_root, encode_table, encode_transaction, find_key_columns},
 };
@@ -89,7 +89,7 @@ pub fn merge_changes<I, NS, W>(
     writer: &mut W,
     target_page_size: usize,
     page_size_stddev: usize,
-) -> anyhow::Result<Option<Id>>
+) -> Result<Option<Id>>
 where
     I: Iterator<Item = Change>,
     NS: NodeSource,
@@ -149,15 +149,15 @@ where
         // Get current leaf page
         let (leaf_id, _) = cursor
             .current()
-            .ok_or_else(|| anyhow::anyhow!("Cursor has no current position"))?;
+            .ok_or_else(|| BeechError::InternalError("Cursor has no current position".to_string()))?;
         let leaf_page = node_source.get_page(leaf_id, &table.key_scheme, &table.row_scheme)?;
 
         // Determine the highest key in this leaf to know when to stop collecting changes
         let Page::Leaf { keys, rows } = &*leaf_page else {
-            return Err(anyhow::anyhow!("Expected leaf page"));
+            return Err(BeechError::Corrupt("Expected leaf page but found branch page".to_string()));
         };
         let Some(leaf_highest_key) = keys.last() else {
-            return Err(anyhow::anyhow!("Empty leaf page encountered"));
+            return Err(BeechError::Corrupt("Empty leaf page encountered".to_string()));
         };
 
         // Create an iterator that takes changes for this leaf
@@ -247,7 +247,7 @@ fn apply_changes_to_leaf<I>(
     _row_scheme: &Schema,
     target_page_size: usize,
     page_size_stddev: usize,
-) -> anyhow::Result<Vec<PageMetadata>>
+) -> Result<Vec<PageMetadata>>
 where
     I: Iterator<Item = Change>,
 {
@@ -273,7 +273,7 @@ where
                     .iter()
                     .any(|(k, _)| k.compare_key(&key) == std::cmp::Ordering::Equal)
                 {
-                    return Err(anyhow::anyhow!("Duplicate key in insert: {:?}", key));
+                    return Err(BeechError::DuplicateKey(format!("{:?}", key)));
                 }
                 records.push((key, (row_id, record)));
             }
@@ -289,7 +289,7 @@ where
                 {
                     records[pos] = (key, (row_id, record));
                 } else {
-                    return Err(anyhow::anyhow!("Cannot update non-existent key: {:?}", key));
+                    return Err(BeechError::NotFound(format!("{:?}", key)));
                 }
             }
             Change::Delete { key } => {
@@ -300,7 +300,7 @@ where
                 {
                     records.remove(pos);
                 } else {
-                    return Err(anyhow::anyhow!("Cannot delete non-existent key: {:?}", key));
+                    return Err(BeechError::NotFound(format!("{:?}", key)));
                 }
             }
         }
@@ -349,7 +349,7 @@ fn write_page_metadata<W: Writer>(
     metadata: &PageMetadata,
     _key_scheme: &Schema,
     _row_scheme: &Schema,
-) -> anyhow::Result<Id> {
+) -> Result<Id> {
     // This function should write a leaf page from metadata
     // The metadata doesn't contain the actual keys/rows, so this seems problematic
     // For now, return the ID that was already generated
@@ -357,9 +357,9 @@ fn write_page_metadata<W: Writer>(
     Ok(metadata.id.clone())
 }
 
-fn create_branch_from_children(children: &[PageMetadata]) -> anyhow::Result<PageMetadata> {
+fn create_branch_from_children(children: &[PageMetadata]) -> Result<PageMetadata> {
     if children.is_empty() {
-        return Err(anyhow::anyhow!("Cannot create branch from empty children"));
+        return Err(BeechError::InternalError("Cannot create branch from empty children".to_string()));
     }
 
     // Get the highest key from the last child
@@ -395,9 +395,9 @@ fn write_branch_page<W: Writer>(
     children: &[PageMetadata],
     key_scheme: &Schema,
     row_scheme: &Schema,
-) -> anyhow::Result<Id> {
+) -> Result<Id> {
     if children.is_empty() {
-        return Err(anyhow::anyhow!("Cannot write branch page with no children"));
+        return Err(BeechError::InternalError("Cannot write branch page with no children".to_string()));
     }
 
     // Extract the separator keys (highest key of each child except the last)
@@ -524,12 +524,12 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     target_page_size: usize,
     page_size_stddev: usize,
     prev_id: Option<Id>,
-) -> anyhow::Result<(Id, Id)> {
+) -> Result<(Id, Id)> {
     // Extract schema from first record
     let row_schema = if let Some((_, first_record)) = rows.first() {
         infer_row_schema_from_record(first_record)?
     } else {
-        return Err(anyhow::anyhow!("No rows provided"));
+        return Err(BeechError::Args("No rows provided".to_string()));
     };
 
     let key_schema = extract_key_schema(&row_schema, &key_column_indices)?;
@@ -561,7 +561,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
             .iter()
             .cloned()
             .reduce(|acc, key| acc.max_key(key))
-            .ok_or_else(|| anyhow::anyhow!("Empty page created"))?;
+            .ok_or_else(|| BeechError::InternalError("Empty page created".to_string()))?;
 
         // Convert to the format expected by Page::Leaf
         let leaf_rows: Vec<(i64, Vec<Value>)> = page_rows
@@ -607,7 +607,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
                 .iter()
                 .cloned()
                 .reduce(|acc, key| acc.max_key(key))
-                .ok_or_else(|| anyhow::anyhow!("Empty branch page created"))?;
+                .ok_or_else(|| BeechError::InternalError("Empty branch page created".to_string()))?;
 
             // Calculate depth and row count from child metadata
             let mut total_row_count = 0i64;
@@ -655,7 +655,8 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     let table_bytes = encode_table(
         &table,
         SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
             .as_millis() as i64,
     )?;
     writer.write(file_name(&table_id), &table_bytes)?;
@@ -688,7 +689,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
 fn create_constraint_from_key(
     key: &Key,
     table: &Table,
-) -> anyhow::Result<(Vec<Constraint>, Vec<Value>)> {
+) -> Result<(Vec<Constraint>, Vec<Value>)> {
     // Create equality constraints for each key column
     let mut constraints = Vec::new();
     let mut values = Vec::new();
@@ -701,7 +702,7 @@ fn create_constraint_from_key(
         if i < key.len() {
             values.push(key[i].clone());
         } else {
-            return Err(anyhow::anyhow!("Key has fewer values than key columns"));
+            return Err(BeechError::SchemaMismatch("Key has fewer values than key columns".to_string()));
         }
     }
 
@@ -745,10 +746,10 @@ fn generate_transaction_id(prev_id: &Id, transaction_time: &SystemTime) -> Id {
     Id::from(id_bytes)
 }
 
-pub fn infer_row_schema_from_record(record: &Value) -> anyhow::Result<Schema> {
+pub fn infer_row_schema_from_record(record: &Value) -> Result<Schema> {
     match record {
         Value::Record(fields) => {
-            let schema_fields: anyhow::Result<Vec<_>> = fields
+            let schema_fields: Result<Vec<_>> = fields
                 .iter()
                 .enumerate()
                 .map(|(i, (name, value))| {
@@ -758,7 +759,7 @@ pub fn infer_row_schema_from_record(record: &Value) -> anyhow::Result<Schema> {
                         Value::Double(_) => Schema::Double,
                         Value::Int(_) => Schema::Int,
                         Value::Boolean(_) => Schema::Boolean,
-                        _ => return Err(anyhow::anyhow!("Unsupported field type")),
+                        _ => return Err(BeechError::UnsupportedType("Unsupported field type".to_string())),
                     };
                     Ok(RecordField {
                         name: name.clone(),
@@ -788,20 +789,20 @@ pub fn infer_row_schema_from_record(record: &Value) -> anyhow::Result<Schema> {
                 attributes: BTreeMap::new(),
             }))
         }
-        _ => Err(anyhow::anyhow!("Expected record value")),
+        _ => Err(BeechError::SchemaMismatch("Expected record value".to_string())),
     }
 }
 
-fn extract_key_schema(row_schema: &Schema, key_column_indices: &[usize]) -> anyhow::Result<Schema> {
+fn extract_key_schema(row_schema: &Schema, key_column_indices: &[usize]) -> Result<Schema> {
     if let Schema::Record(row_record) = row_schema {
-        let key_fields: anyhow::Result<Vec<_>> = key_column_indices
+        let key_fields: Result<Vec<_>> = key_column_indices
             .iter()
             .enumerate()
             .map(|(i, &col_idx)| {
                 row_record
                     .fields
                     .get(col_idx)
-                    .ok_or_else(|| anyhow::anyhow!("Key column index out of bounds"))
+                    .ok_or_else(|| BeechError::SchemaMismatch("Key column index out of bounds".to_string()))
                     .map(|field| RecordField {
                         name: field.name.clone(),
                         doc: None,
@@ -830,7 +831,7 @@ fn extract_key_schema(row_schema: &Schema, key_column_indices: &[usize]) -> anyh
             attributes: BTreeMap::new(),
         }))
     } else {
-        Err(anyhow::anyhow!("Expected record schema"))
+        Err(BeechError::SchemaMismatch("Expected record schema".to_string()))
     }
 }
 
@@ -849,9 +850,9 @@ fn key_from_row_values(key_columns: &[usize], row: &[Value]) -> Vec<Value> {
 fn create_page_metadata_from_records(
     records: Vec<(Key, (i64, Vec<Value>))>,
     shaper: &mut ProbShaper,
-) -> anyhow::Result<PageMetadata> {
+) -> Result<PageMetadata> {
     if records.is_empty() {
-        return Err(anyhow::anyhow!("Cannot create page from empty records"));
+        return Err(BeechError::InternalError("Cannot create page from empty records".to_string()));
     }
 
     // Extract keys and rows
@@ -873,7 +874,7 @@ fn create_page_metadata_from_records(
 }
 
 /// Serialize key for probabilistic splitting decision
-fn serialize_key_for_splitting(key: &Key) -> anyhow::Result<Vec<u8>> {
+fn serialize_key_for_splitting(key: &Key) -> Result<Vec<u8>> {
     // Simple serialization - could be improved
     let mut bytes = Vec::new();
     for value in key {
@@ -895,7 +896,7 @@ fn build_tree_from_leaves<W: Writer>(
     writer: &mut W,
     key_scheme: &Schema,
     row_scheme: &Schema,
-) -> anyhow::Result<Option<Id>> {
+) -> Result<Option<Id>> {
     if leaf_metadata.is_empty() {
         return Ok(None);
     }
