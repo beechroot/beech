@@ -197,7 +197,6 @@ dependencies = [
 name = "beech-write"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "apache-avro",
  "beech-core",
  "beech-shaper",
