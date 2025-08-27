@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["beech-core", "beech-mem", "beech-sqlite3", "beech-cli", "beech-write"]
+members = ["beech-core", "beech-mem", "beech-sqlite3", "beech-cli", "beech-write", "beech-sqlite3-test"]
 
 [workspace.dependencies]
 apache-avro = { version = "0.18.0", features = ["derive"]}
