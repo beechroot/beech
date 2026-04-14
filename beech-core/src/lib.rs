@@ -201,12 +201,17 @@ impl Page {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TableSchema {
+    pub key_scheme: Schema,
+    pub row_scheme: Schema,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     pub id: Id,
     pub name: String,
     pub root: Option<Id>,
-    pub key_scheme: Schema,
-    pub row_scheme: Schema,
+    pub schema: TableSchema,
     pub key_columns: Vec<(usize, Column)>,
     columns: Vec<Column>,
 }
@@ -238,8 +243,7 @@ impl Table {
         id: Id,
         name: String,
         root: Option<Id>,
-        key_scheme: Schema,
-        row_scheme: Schema,
+        schema: TableSchema,
     ) -> std::result::Result<Table, SchemaError> {
         if let (
             Schema::Record(RecordSchema {
@@ -248,7 +252,7 @@ impl Table {
             Schema::Record(RecordSchema {
                 fields: row_fields, ..
             }),
-        ) = (&key_scheme, &row_scheme)
+        ) = (&schema.key_scheme, &schema.row_scheme)
         {
             // iterate over the fields of the row, and find the corresponding key fields
             let columns: Vec<_> = row_fields
@@ -284,8 +288,7 @@ impl Table {
             Ok(Table {
                 id,
                 name,
-                key_scheme,
-                row_scheme,
+                schema,
                 root,
                 key_columns,
                 columns,
@@ -328,8 +331,7 @@ pub trait NodeSource {
     fn get_root(&self) -> Result<Arc<Root>>;
     fn get_transaction(&self, transaction_id: &Id) -> Result<Arc<Transaction>>;
     fn get_table(&self, transaction: &Transaction, table_name: &str) -> Result<Arc<Table>>;
-    fn get_page(&self, page_id: &Id, key_scheme: &Schema, row_scheme: &Schema)
-    -> Result<Arc<Page>>;
+    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Page>>;
 }
 
 pub trait BackingStore<K> {

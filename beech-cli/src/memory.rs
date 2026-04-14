@@ -3,9 +3,10 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
-use apache_avro::Schema;
 use beech_core::wire::{decode_page, decode_root, decode_table, decode_transaction};
-use beech_core::{DomainError, Id, Page, Result, Root, StorageError, Table, Transaction};
+use beech_core::{
+    DomainError, Id, Page, Result, Root, StorageError, Table, TableSchema, Transaction,
+};
 
 /// Memory-backed writer for testing that doesn't write to filesystem
 pub struct Writer {
@@ -81,15 +82,10 @@ impl beech_core::NodeSource for NodeSource {
         }
     }
 
-    fn get_page(
-        &self,
-        page_id: &Id,
-        key_scheme: &Schema,
-        row_scheme: &Schema,
-    ) -> Result<Arc<Page>> {
+    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Page>> {
         let data = self.get_file_data(page_id)?;
         let mut cursor = Cursor::new(data);
-        Ok(Arc::new(decode_page(&mut cursor, key_scheme, row_scheme)?))
+        Ok(Arc::new(decode_page(&mut cursor, schema)?))
     }
 }
 

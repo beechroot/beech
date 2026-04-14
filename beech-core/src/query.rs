@@ -198,7 +198,7 @@ impl Cursor {
 
         // Check if we've moved beyond our constraints
         if let Some((id, child)) = &self.stack.last() {
-            let p = source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
+            let p = source.get_page(id, &self.table.schema)?;
             let maybe_key = p.keys().get(*child);
             if let Some(key) = maybe_key {
                 if self.done_iterating(key) {
@@ -214,7 +214,7 @@ impl Cursor {
         loop {
             match self.stack.pop() {
                 Some((id, _)) => {
-                    let p = source.get_page(&id, &self.table.key_scheme, &self.table.row_scheme)?;
+                    let p = source.get_page(&id, &self.table.schema)?;
                     match &*p {
                         Page::Branch { children, .. } => {
                             let next_child_idx = children.len() - 1;
@@ -233,7 +233,7 @@ impl Cursor {
     }
     pub fn advance_to_left(&mut self, source: &dyn NodeSource) -> Result<()> {
         while let Some((id, child)) = &self.stack.pop() {
-            let p = source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
+            let p = source.get_page(id, &self.table.schema)?;
             if let Some(new_child) = self.find_next_child(&p, *child) {
                 self.stack.push((id.clone(), new_child));
                 if let Page::Branch { children, .. } = &*p {
@@ -285,8 +285,7 @@ impl Cursor {
             match &self.stack.pop() {
                 Some((id, child)) => {
                     let (last_child, new_lower_bound) = {
-                        let p =
-                            source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
+                        let p = source.get_page(id, &self.table.schema)?;
                         (p.last_child(), p.keys().get(*child).cloned())
                     };
                     self.lower_bound = new_lower_bound;
@@ -306,7 +305,7 @@ impl Cursor {
         self.advance_stack(source)?;
         self.advance_to_left(source)?;
         if let Some((id, child)) = &self.stack.last() {
-            let p = source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
+            let p = source.get_page(id, &self.table.schema)?;
 
             let maybe_key = p.keys().get(*child);
             if let Some(key) = maybe_key {

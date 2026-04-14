@@ -271,7 +271,7 @@ fn info_command(data_dir: PathBuf) -> anyhow::Result<()> {
         let table = node_source.get_table(&transaction, table_name)?;
 
         let (root_page, tree_depth, total_rows) = if let Some(root_id) = &table.root {
-            let root_page = node_source.get_page(root_id, &table.key_scheme, &table.row_scheme)?;
+            let root_page = node_source.get_page(root_id, &table.schema)?;
             (
                 Some(root_id.to_string()),
                 root_page.depth(),
@@ -384,7 +384,7 @@ fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow
     let table = node_source.get_table(&transaction, table_name)?;
 
     // Get the page
-    let page = node_source.get_page(&page_id, &table.key_scheme, &table.row_scheme)?;
+    let page = node_source.get_page(&page_id, &table.schema)?;
 
     // Create the inspection structure
     let inspection = match &*page {
@@ -546,9 +546,7 @@ mod tests {
         // Test by directly accessing the leaf page (simpler approach)
         let mut retrieved_rows = Vec::new();
         if let Some(root_id) = &table.root {
-            let page = node_source
-                .get_page(root_id, &table.key_scheme, &table.row_scheme)
-                .unwrap();
+            let page = node_source.get_page(root_id, &table.schema).unwrap();
             if let Page::Leaf { rows, .. } = page.as_ref() {
                 for (row_id, row_values) in rows {
                     let record = Value::Record(vec![
@@ -671,9 +669,7 @@ mod tests {
 
         // Test root page metadata - cursor depth 3 means root page depth 2 (since leaves are depth 0)
         if let Some(root_page_id) = &table.root {
-            let root_page = node_source
-                .get_page(root_page_id, &table.key_scheme, &table.row_scheme)
-                .unwrap();
+            let root_page = node_source.get_page(root_page_id, &table.schema).unwrap();
             let expected_root_depth = (tree_depth - 1) as i32; // Root depth = cursor depth - 1
             assert_eq!(
                 root_page.depth(),
@@ -701,9 +697,7 @@ mod tests {
         let mut count = 0;
         while !cursor.eof() {
             let (page_id, row_index) = cursor.current().unwrap();
-            let page = node_source
-                .get_page(page_id, &table.key_scheme, &table.row_scheme)
-                .unwrap();
+            let page = node_source.get_page(page_id, &table.schema).unwrap();
             let Page::Leaf { rows, .. } = page.as_ref() else {
                 panic!("Expected leaf page, got branch page");
             };
@@ -737,9 +731,7 @@ mod tests {
             // Verify the first row matches our constraint
             assert!(!bounded_cursor.eof(), "Bounded cursor should not be at EOF");
             let (page_id, row_index) = bounded_cursor.current().unwrap();
-            let page = node_source
-                .get_page(page_id, &table.key_scheme, &table.row_scheme)
-                .unwrap();
+            let page = node_source.get_page(page_id, &table.schema).unwrap();
             let Page::Leaf { rows, .. } = page.as_ref() else {
                 panic!("Expected leaf page, got branch page");
             };

@@ -360,11 +360,7 @@ impl BeechCursor {
 
     fn get_current_row(&self) -> beech_core::Result<Option<Vec<apache_avro::types::Value>>> {
         if let Some((page_id, row_idx)) = self.cursor.current() {
-            let page = self.source.get_page(
-                page_id,
-                &self.cursor.table.key_scheme,
-                &self.cursor.table.row_scheme,
-            )?;
+            let page = self.source.get_page(page_id, &self.cursor.table.schema)?;
 
             match &*page {
                 beech_core::Page::Leaf { rows, .. } => {
@@ -479,11 +475,7 @@ unsafe impl VTabCursor for BeechCursor {
         };
         let page = self
             .source
-            .get_page(
-                page_id,
-                &self.cursor.table.key_scheme,
-                &self.cursor.table.row_scheme,
-            )
+            .get_page(page_id, &self.cursor.table.schema)
             .map_err(into_rusqlite_error)?;
         match &*page {
             beech_core::Page::Leaf { rows, .. } => {

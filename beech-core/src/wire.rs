@@ -1,4 +1,4 @@
-use crate::{Id, Page, Result, Root, SchemaError, Table, Transaction, WireError};
+use crate::{Id, Page, Result, Root, SchemaError, Table, TableSchema, Transaction, WireError};
 use apache_avro::schema::{ArraySchema, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::{AvroSchema, Schema, from_avro_datum, from_value, to_avro_datum, to_value};
@@ -142,14 +142,9 @@ fn encode_record_array<W: Write>(
     writer.write_all(&bytes)?;
     Ok(())
 }
-pub fn encode_page(
-    page: &Page,
-    id: Id,
-    key_scheme: &Schema,
-    row_scheme: &Schema,
-) -> Result<Vec<u8>> {
-    assert!(is_record_scheme(key_scheme));
-    assert!(is_record_scheme(row_scheme));
+pub fn encode_page(page: &Page, id: Id, schema: &TableSchema) -> Result<Vec<u8>> {
+    assert!(is_record_scheme(&schema.key_scheme));
+    assert!(is_record_scheme(&schema.row_scheme));
     let mut wp = WirePage::default();
     wp.id = id;
     match page {
@@ -163,7 +158,7 @@ pub fn encode_page(
             wp.depth = *depth;
             wp.row_count = *row_count;
             let mut writer = Vec::new();
-            encode_record_array(&mut writer, key_scheme, keys)?;
+            encode_record_array(&mut writer, &schema.key_scheme, keys)?;
             wp.keys = writer;
         }
         Page::Leaf { rows, .. } => {
@@ -172,7 +167,7 @@ pub fn encode_page(
             let (rowids, rows): (Vec<_>, Vec<_>) = rows.clone().into_iter().unzip();
             wp.rowids = rowids;
             let mut writer = Vec::new();
-            encode_record_array(&mut writer, row_scheme, &rows)?;
+            encode_record_array(&mut writer, &schema.row_scheme, &rows)?;
             wp.rows = writer;
         }
     }
@@ -216,20 +211,16 @@ fn decode_record_array(scheme: &Schema, data: &[u8]) -> Result<Vec<Vec<Value>>> 
         .collect()
 }
 
-pub fn decode_page<R: Read>(
-    reader: &mut R,
-    key_scheme: &Schema,
-    row_scheme: &Schema,
-) -> Result<Page> {
+pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Page> {
     let wp_value = from_avro_datum(&wire_page_schema()?, reader, None)?;
     let wp: WirePage = from_value(&wp_value)?;
     let is_leaf = wp.children.is_empty();
     if is_leaf {
-        let rows = decode_record_array(row_scheme, &wp.rows[..])?;
+        let rows = decode_record_array(&schema.row_scheme, &wp.rows[..])?;
         if rows.len() != wp.rowids.len() {
             return Err(WireError::Malformed("leaf rows/rowids length mismatch").into());
         }
-        let key_columns: Vec<usize> = find_key_columns(key_scheme, row_scheme)?;
+        let key_columns: Vec<usize> = find_key_columns(schema)?;
         let keys: Vec<Vec<_>> = rows
             .iter()
             .map(|row| key_from_row(&key_columns, row))
@@ -240,7 +231,7 @@ pub fn decode_page<R: Read>(
             rows: ids_and_rows,
         })
     } else {
-        let keys: Vec<Vec<_>> = decode_record_array(key_scheme, &wp.keys[..])?;
+        let keys: Vec<Vec<_>> = decode_record_array(&schema.key_scheme, &wp.keys[..])?;
         if keys.len() + 1 != wp.children.len() {
             return Err(WireError::Malformed("branch keys/children length mismatch").into());
         }
@@ -257,8 +248,8 @@ fn key_from_row(key_columns: &Vec<usize>, row: &Vec<Value>) -> Vec<Value> {
     key_columns.iter().map(|i| row[*i].clone()).collect()
 }
 
-pub fn find_key_columns(key_scheme: &Schema, row_scheme: &Schema) -> Result<Vec<usize>> {
-    let key_columns = match (key_scheme, row_scheme) {
+pub fn find_key_columns(schema: &TableSchema) -> Result<Vec<usize>> {
+    let key_columns = match (&schema.key_scheme, &schema.row_scheme) {
         (Schema::Record(key_record), Schema::Record(row_record)) => key_record
             .fields
             .iter()
@@ -287,8 +278,8 @@ pub fn encode_table(table: &Table, timestamp: i64) -> Result<Vec<u8>> {
         id: table.id.clone(),
         name: table.name.clone(),
         timestamp,
-        key_scheme: table.key_scheme.canonical_form().to_string(),
-        row_scheme: table.row_scheme.canonical_form().to_string(),
+        key_scheme: table.schema.key_scheme.canonical_form().to_string(),
+        row_scheme: table.schema.row_scheme.canonical_form().to_string(),
         root: table.root.clone(),
     };
     let bytes = to_avro_datum(&WireTable::get_schema(), to_value(wire_table)?)?;
@@ -299,14 +290,15 @@ pub fn decode_table<R: Read>(reader: &mut R) -> Result<Table> {
     let wire_table = from_avro_datum(&WireTable::get_schema(), reader, None)?;
     let wire_table: WireTable = from_value(&wire_table)?;
 
-    let key_scheme = Schema::parse_str(&wire_table.key_scheme)?;
-    let row_scheme = Schema::parse_str(&wire_table.row_scheme)?;
+    let schema = TableSchema {
+        key_scheme: Schema::parse_str(&wire_table.key_scheme)?,
+        row_scheme: Schema::parse_str(&wire_table.row_scheme)?,
+    };
     Ok(Table::new(
         wire_table.id,
         wire_table.name,
         wire_table.root,
-        key_scheme,
-        row_scheme,
+        schema,
     )?)
 }
 
@@ -371,10 +363,12 @@ mod tests {
         };
 
         for page in [leaf, branch] {
-            let key_scheme = MyKey::get_schema();
-            let row_scheme = MyRecord::get_schema();
-            let encoded = encode_page(&page, 9999.into(), &key_scheme, &row_scheme).unwrap();
-            let decoded = decode_page(&mut Cursor::new(encoded), &key_scheme, &row_scheme).unwrap();
+            let schema = TableSchema {
+                key_scheme: MyKey::get_schema(),
+                row_scheme: MyRecord::get_schema(),
+            };
+            let encoded = encode_page(&page, 9999.into(), &schema).unwrap();
+            let decoded = decode_page(&mut Cursor::new(encoded), &schema).unwrap();
             assert_eq!(page, decoded);
         }
     }
@@ -382,20 +376,17 @@ mod tests {
     #[test]
     fn test_table_roundtrip() {
         init_logger();
-        let table = Table::new(
-            999.into(),
-            "test".to_string(),
-            None,
-            Schema::parse_str(
+        let schema = TableSchema {
+            key_scheme: Schema::parse_str(
                 r#"{ "type": "record", "name": "aaa", "fields": [{"name": "x", "type": "int"}] }"#,
             )
             .unwrap(),
-            Schema::parse_str(
+            row_scheme: Schema::parse_str(
                 r#"{ "type": "record", "name": "aaa", "fields": [{"name": "x", "type": "int"}] }"#,
             )
             .unwrap(),
-        )
-        .unwrap();
+        };
+        let table = Table::new(999.into(), "test".to_string(), None, schema).unwrap();
         let encoded = encode_table(&table, 1234567890).unwrap();
         let decoded = decode_table(&mut Cursor::new(encoded)).unwrap();
         assert_eq!(table, decoded);

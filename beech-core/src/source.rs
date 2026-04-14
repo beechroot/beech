@@ -1,9 +1,9 @@
 use super::Result;
 use super::{
-    BackingStore, DomainError, Id, NodeSource, Page, Root, StorageError, Table, Transaction,
+    BackingStore, DomainError, Id, NodeSource, Page, Root, StorageError, Table, TableSchema,
+    Transaction,
     wire::{decode_page, decode_root, decode_table, decode_transaction},
 };
-use apache_avro::Schema;
 use std::{io::Cursor, sync::Arc};
 
 pub struct LocalFile<S>
@@ -60,17 +60,12 @@ where
                 })?;
         self.get_table_by_id(table_id)
     }
-    fn get_page(
-        &self,
-        page_id: &Id,
-        key_scheme: &Schema,
-        row_scheme: &Schema,
-    ) -> Result<Arc<Page>> {
+    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Page>> {
         let Some(page_bytes) = self.store.get(page_id)? else {
             return Err(StorageError::key_not_found("page", page_id.clone()).into());
         };
         let mut reader = Cursor::new(&*page_bytes);
-        let page = decode_page(&mut reader, key_scheme, row_scheme)?;
+        let page = decode_page(&mut reader, schema)?;
         Ok(Arc::new(page))
     }
 }

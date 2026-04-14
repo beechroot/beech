@@ -7,7 +7,7 @@ use beech_core::{
     query::{Constraint, ConstraintOp, Cursor},
     wire::{encode_page, encode_root, encode_table, encode_transaction, find_key_columns},
     DomainError, Id, Key, KeyOrdering, NodeSource, Page, QueryError, Result, Root, Row,
-    SchemaError, Table, Transaction,
+    SchemaError, Table, TableSchema, Transaction,
 };
 use beech_shaper::ProbShaper;
 use itertools::Itertools;
@@ -109,16 +109,14 @@ where
             &[],
             &[],
             changes,
-            &table.key_scheme,
-            &table.row_scheme,
+            &table.schema,
             target_page_size,
             page_size_stddev,
         )?;
 
         // Write pages and collect metadata
         for page_meta in updated_pages {
-            let page_id =
-                write_page_metadata(writer, &page_meta, &table.key_scheme, &table.row_scheme)?;
+            let page_id = write_page_metadata(writer, &page_meta, &table.schema)?;
             leaf_metadata.push(PageMetadata {
                 id: page_id,
                 highest_key: page_meta.highest_key,
@@ -133,8 +131,7 @@ where
             target_page_size,
             page_size_stddev,
             writer,
-            &table.key_scheme,
-            &table.row_scheme,
+            &table.schema,
         );
     }
 
@@ -149,7 +146,7 @@ where
     while !cursor.eof() && changes.peek().is_some() {
         // Get current leaf page
         let (leaf_id, _) = cursor.current().ok_or(QueryError::EmptyStack)?;
-        let leaf_page = node_source.get_page(leaf_id, &table.key_scheme, &table.row_scheme)?;
+        let leaf_page = node_source.get_page(leaf_id, &table.schema)?;
 
         // Determine the highest key in this leaf to know when to stop collecting changes
         let Page::Leaf { keys, rows } = &*leaf_page else {
@@ -182,8 +179,7 @@ where
             keys,
             rows,
             leaf_changes_iter,
-            &table.key_scheme,
-            &table.row_scheme,
+            &table.schema,
             target_page_size,
             page_size_stddev,
         )?;
@@ -191,8 +187,7 @@ where
         // Write updated pages and collect metadata
         for page_meta in updated_pages {
             // Write page to storage
-            let page_id =
-                write_page_metadata(writer, &page_meta, &table.key_scheme, &table.row_scheme)?;
+            let page_id = write_page_metadata(writer, &page_meta, &table.schema)?;
             leaf_metadata.push(PageMetadata {
                 id: page_id,
                 highest_key: page_meta.highest_key,
@@ -211,16 +206,14 @@ where
             &[], // No existing keys for new leaves
             &[], // No existing rows for new leaves
             changes,
-            &table.key_scheme,
-            &table.row_scheme,
+            &table.schema,
             target_page_size,
             page_size_stddev,
         )?;
 
         // Write pages and collect metadata
         for page_meta in remaining_pages {
-            let page_id =
-                write_page_metadata(writer, &page_meta, &table.key_scheme, &table.row_scheme)?;
+            let page_id = write_page_metadata(writer, &page_meta, &table.schema)?;
             leaf_metadata.push(PageMetadata {
                 id: page_id,
                 highest_key: page_meta.highest_key,
@@ -236,8 +229,7 @@ where
         target_page_size,
         page_size_stddev,
         writer,
-        &table.key_scheme,
-        &table.row_scheme,
+        &table.schema,
     )
 }
 
@@ -246,8 +238,7 @@ fn apply_changes_to_leaf<I>(
     existing_keys: &[Key],
     existing_rows: &[Row],
     changes: I,
-    _key_scheme: &Schema,
-    _row_scheme: &Schema,
+    _schema: &TableSchema,
     target_page_size: usize,
     page_size_stddev: usize,
 ) -> Result<Vec<PageMetadata>>
@@ -349,8 +340,7 @@ where
 fn write_page_metadata<W: Writer>(
     _writer: &mut W,
     metadata: &PageMetadata,
-    _key_scheme: &Schema,
-    _row_scheme: &Schema,
+    _schema: &TableSchema,
 ) -> Result<Id> {
     // This function should write a leaf page from metadata
     // The metadata doesn't contain the actual keys/rows, so this seems problematic
@@ -397,8 +387,7 @@ fn create_branch_from_children(children: &[PageMetadata]) -> Result<PageMetadata
 fn write_branch_page<W: Writer>(
     writer: &mut W,
     children: &[PageMetadata],
-    key_scheme: &Schema,
-    row_scheme: &Schema,
+    schema: &TableSchema,
 ) -> Result<Id> {
     if children.is_empty() {
         return Err(DomainError::InvalidArgs(
@@ -439,7 +428,7 @@ fn write_branch_page<W: Writer>(
         row_count,
     };
 
-    let page_bytes = encode_page(&page, page_id.clone(), key_scheme, row_scheme)?;
+    let page_bytes = encode_page(&page, page_id.clone(), schema)?;
     writer.write(file_name(&page_id), &page_bytes)?;
 
     Ok(page_id)
@@ -531,7 +520,11 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     };
 
     let key_schema = extract_key_schema(&row_schema, &key_column_indices)?;
-    let key_columns = find_key_columns(&key_schema, &row_schema)?;
+    let schema = TableSchema {
+        key_scheme: key_schema,
+        row_scheme: row_schema,
+    };
+    let key_columns = find_key_columns(&schema)?;
 
     // Convert rows to the format expected by the tree builder
     let rows_with_data: Vec<(i64, Value, Vec<Value>)> = rows
@@ -549,7 +542,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     let mut rows_iter = rows_with_data.into_iter();
     loop {
         match split_leafs(
-            &row_schema,
+            &schema.row_scheme,
             target_page_size,
             page_size_stddev,
             &mut rows_iter,
@@ -577,7 +570,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
                     rows: leaf_rows.clone(),
                 };
 
-                let page_bytes = encode_page(&page, page_id.clone(), &key_schema, &row_schema)?;
+                let page_bytes = encode_page(&page, page_id.clone(), &schema)?;
                 writer.write(file_name(&page_id), &page_bytes)?;
 
                 pages.push(PageMetadata {
@@ -595,7 +588,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     while pages.len() > 1 {
         let mut new_pages: Vec<PageMetadata> = vec![];
         for (page_id, branch_entries) in pages.into_iter().batching(|it| {
-            split_branch_metadata(&key_schema, target_page_size, page_size_stddev, it)
+            split_branch_metadata(&schema.key_scheme, target_page_size, page_size_stddev, it)
         }) {
             let (entry_keys, children_metadata): (Vec<_>, Vec<_>) =
                 branch_entries.into_iter().unzip();
@@ -633,7 +626,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
                 depth,
                 row_count,
             };
-            let page_bytes = encode_page(&page, page_id.clone(), &key_schema, &row_schema)?;
+            let page_bytes = encode_page(&page, page_id.clone(), &schema)?;
             writer.write(file_name(&page_id), &page_bytes)?;
 
             new_pages.push(PageMetadata {
@@ -651,13 +644,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
 
     // Create table
     let table_id = generate_table_id(root_page_id.as_ref(), &table_name);
-    let table = Table::new(
-        table_id.clone(),
-        table_name.clone(),
-        root_page_id,
-        key_schema,
-        row_schema,
-    )?;
+    let table = Table::new(table_id.clone(), table_name.clone(), root_page_id, schema)?;
     let table_bytes = encode_table(
         &table,
         SystemTime::now()
@@ -926,8 +913,7 @@ fn build_tree_from_leaves<W: Writer>(
     target_page_size: usize,
     page_size_stddev: usize,
     writer: &mut W,
-    key_scheme: &Schema,
-    row_scheme: &Schema,
+    schema: &TableSchema,
 ) -> Result<Option<Id>> {
     if leaf_metadata.is_empty() {
         return Ok(None);
@@ -952,8 +938,7 @@ fn build_tree_from_leaves<W: Writer>(
             // Check if we should create a branch page
             if shaper.is_complete(child_id.as_bytes()) && !current_children.is_empty() {
                 let branch_meta = create_branch_from_children(&current_children)?;
-                let branch_id =
-                    write_branch_page(writer, &current_children, key_scheme, row_scheme)?;
+                let branch_id = write_branch_page(writer, &current_children, schema)?;
                 next_level.push(PageMetadata {
                     id: branch_id,
                     highest_key: branch_meta.highest_key,
@@ -968,7 +953,7 @@ fn build_tree_from_leaves<W: Writer>(
         // Don't forget the last branch page
         if !current_children.is_empty() {
             let branch_meta = create_branch_from_children(&current_children)?;
-            let branch_id = write_branch_page(writer, &current_children, key_scheme, row_scheme)?;
+            let branch_id = write_branch_page(writer, &current_children, schema)?;
             next_level.push(PageMetadata {
                 id: branch_id,
                 highest_key: branch_meta.highest_key,
