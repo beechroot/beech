@@ -24,7 +24,7 @@ use rusqlite::ffi::ErrorCode;
 use rusqlite::types::ValueRef;
 use rusqlite::vtab::{
     Context, CreateVTab, Filters, IndexConstraintOp, IndexInfo, VTab, VTabConnection, VTabCursor,
-    VTabKind, read_only_module,
+    VTabKind, read_only_module, sqlite3_vtab, sqlite3_vtab_cursor,
 };
 use std::collections::HashMap;
 use std::ffi::c_int;
@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 mod store;
 
+#[repr(C)]
 struct BeechTable {
+    base: sqlite3_vtab,
     remote_table_name: String,
     source: Arc<dyn NodeSource>,
     data_path: PathBuf,
@@ -121,12 +123,14 @@ fn parse_arg(a: &[u8]) -> Result<String> {
             String::from_utf8_lossy(a)
         ))
     })?;
-    
+
     // Strip surrounding single or double quotes if they exist
-    if (arg.starts_with('\'') && arg.ends_with('\'')) || (arg.starts_with('"') && arg.ends_with('"')) {
-        arg = arg[1..arg.len()-1].to_string();
+    if (arg.starts_with('\'') && arg.ends_with('\''))
+        || (arg.starts_with('"') && arg.ends_with('"'))
+    {
+        arg = arg[1..arg.len() - 1].to_string();
     }
-    
+
     Ok(arg)
 }
 
@@ -184,14 +188,13 @@ impl BeechTable {
             columns.join(", ")
         };
         let create_sql = format!("CREATE TABLE {local_table_name} ({column_spec});");
-        Ok((
-            create_sql,
-            BeechTable {
-                remote_table_name: remote_table_name.to_string(),
-                source: Arc::new(source),
-                data_path,
-            },
-        ))
+        let table = BeechTable {
+            base: sqlite3_vtab::default(),
+            remote_table_name: remote_table_name.to_string(),
+            source: Arc::new(source),
+            data_path,
+        };
+        Ok((create_sql, table))
     }
     fn do_best_index(&self, info: &mut IndexInfo) -> beech_core::Result<()> {
         // Read the root file to get current transaction ID
@@ -270,7 +273,7 @@ unsafe impl<'vtab> VTab<'vtab> for BeechTable {
             .iter()
             .map(|a| parse_arg(a))
             .collect::<Result<Vec<String>>>()?;
-        
+
         match &parsed_args[..]
         {
             [
@@ -350,7 +353,9 @@ fn into_rusqlite_error(be: BeechError) -> rusqlite::Error {
     }
 }
 
+#[repr(C)]
 struct BeechCursor {
+    base: sqlite3_vtab_cursor,
     cursor: beech_core::query::Cursor,
     source: Arc<dyn NodeSource>,
 }
@@ -358,6 +363,7 @@ struct BeechCursor {
 impl BeechCursor {
     fn new(table: &Table, source: Arc<dyn NodeSource>) -> Self {
         Self {
+            base: sqlite3_vtab_cursor::default(),
             cursor: beech_core::query::Cursor::new(table),
             source,
         }
@@ -414,11 +420,9 @@ impl BeechCursor {
                 ));
             }
         } else {
-            // Create a default IndexUsage if none provided
             IndexUsage::new(self.cursor.table.id.clone())
         };
 
-        // Check schema compatibility
         if index_usage.table_id != self.cursor.table.id {
             return Err(BeechError::SchemaMismatch(
                 "table schema mismatch".to_string(),
@@ -426,8 +430,6 @@ impl BeechCursor {
         }
         debug!("beech_filter(): schema matches");
 
-        // Convert SQLite constraint values to Avro values
-        // These values correspond to the constraints identified by xBestIndex
         let mut values = vec![];
         for (i, value_ref) in args.iter().enumerate() {
             debug!("Converting constraint value {i}: {value_ref:?}");
@@ -435,10 +437,7 @@ impl BeechCursor {
             values.push(avro_value);
         }
 
-        // Initialize the cursor with constraints and values
         self.cursor.init(index_usage.constraints, values);
-
-        // Position the cursor at the first matching row
         self.cursor.advance_to_left(&*self.source)?;
 
         Ok(())

@@ -107,15 +107,34 @@ fn test_virtual_table_creation(test_data_path: PathBuf) -> Result<()> {
                 Err(e) => println!("  Error preparing table list query: {}", e),
             }
 
-            // Try a simple query
-            println!("  - Testing query on test_table...");
+            // Try various queries to test functionality
+            println!("  - Testing queries on test_table...");
+
+            // Test 1: Basic SELECT
             match conn.prepare("SELECT * FROM test_table LIMIT 1") {
-                Ok(mut _stmt) => {
-                    println!("    Basic SELECT prepared successfully");
+                Ok(mut stmt) => {
+                    println!("    ✓ Basic SELECT prepared successfully");
+                    match stmt.query_row([], |row| Ok(format!("First row data available"))) {
+                        Ok(_) => println!("    ✓ Query executed and returned data"),
+                        Err(e) => println!("    Query execution failed: {}", e),
+                    }
                 }
-                Err(e) => {
-                    println!("    Query preparation failed: {}", e);
+                Err(e) => println!("    Basic SELECT preparation failed: {}", e),
+            }
+
+            // Test 2: COUNT query
+            match conn.prepare("SELECT COUNT(*) FROM test_table") {
+                Ok(mut stmt) => {
+                    println!("    ✓ COUNT query prepared successfully");
+                    match stmt.query_row([], |row| {
+                        let count: i64 = row.get(0)?;
+                        Ok(count)
+                    }) {
+                        Ok(count) => println!("    ✓ Found {} rows in test_table", count),
+                        Err(e) => println!("    COUNT execution failed: {}", e),
+                    }
                 }
+                Err(e) => println!("    COUNT preparation failed: {}", e),
             }
         }
         Err(e) => {
@@ -150,4 +169,3 @@ fn get_test_data_path() -> Option<PathBuf> {
 
     None
 }
-
