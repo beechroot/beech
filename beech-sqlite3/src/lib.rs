@@ -23,8 +23,8 @@ use rusqlite::Result;
 use rusqlite::ffi::ErrorCode;
 use rusqlite::types::ValueRef;
 use rusqlite::vtab::{
-    Context, Filters, IndexConstraintOp, IndexInfo, VTab, VTabConnection, VTabCursor,
-    read_only_module, CreateVTab, VTabKind,
+    Context, CreateVTab, Filters, IndexConstraintOp, IndexInfo, VTab, VTabConnection, VTabCursor,
+    VTabKind, read_only_module,
 };
 use std::collections::HashMap;
 use std::ffi::c_int;
@@ -115,12 +115,19 @@ fn from_hex(hex: &str) -> beech_core::Result<Vec<u8>> {
 }
 
 fn parse_arg(a: &[u8]) -> Result<String> {
-    String::from_utf8(a.to_vec()).map_err(|_| {
+    let mut arg = String::from_utf8(a.to_vec()).map_err(|_| {
         rusqlite::Error::InvalidParameterName(format!(
             "Invalid argument: {}",
             String::from_utf8_lossy(a)
         ))
-    })
+    })?;
+    
+    // Strip surrounding single or double quotes if they exist
+    if (arg.starts_with('\'') && arg.ends_with('\'')) || (arg.starts_with('"') && arg.ends_with('"')) {
+        arg = arg[1..arg.len()-1].to_string();
+    }
+    
+    Ok(arg)
 }
 
 fn avro_value_from_sqlite(value: ValueRef<'_>) -> beech_core::Result<apache_avro::types::Value> {
@@ -259,10 +266,12 @@ unsafe impl<'vtab> VTab<'vtab> for BeechTable {
         _aux: Option<&Self::Aux>,
         args: &[&[u8]],
     ) -> Result<(String, Self)> {
-        match &args
+        let parsed_args = args
             .iter()
             .map(|a| parse_arg(a))
-            .collect::<Result<Vec<String>>>()?[..]
+            .collect::<Result<Vec<String>>>()?;
+        
+        match &parsed_args[..]
         {
             [
                 module_name_arg,        // args[0] = "beech"
@@ -311,7 +320,7 @@ unsafe impl<'vtab> VTab<'vtab> for BeechTable {
 
 impl<'vtab> CreateVTab<'vtab> for BeechTable {
     const KIND: VTabKind = VTabKind::Default;
-    
+
     fn create(
         db: &mut VTabConnection,
         aux: Option<&Self::Aux>,
