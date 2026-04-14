@@ -474,20 +474,38 @@ unsafe impl VTabCursor for BeechCursor {
         }
     }
     fn rowid(&self) -> Result<i64> {
-        // For now, use the position in the cursor stack as row id
-        // This is a simple implementation that may need refinement
-        Ok(self
-            .cursor
-            .current()
-            .map(|(id, idx)| {
-                // Use a combination of the page ID hash and index as rowid
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                Hash::hash(id, &mut hasher);
-                let hash = hasher.finish();
-                ((hash as i64) << 16) | (*idx as i64)
-            })
-            .unwrap_or(0))
+        let Some((page_id, row_idx)) = self.cursor.current() else {
+            return Ok(0);
+        };
+        let page = self
+            .source
+            .get_page(
+                page_id,
+                &self.cursor.table.key_scheme,
+                &self.cursor.table.row_scheme,
+            )
+            .map_err(into_rusqlite_error)?;
+        match &*page {
+            beech_core::Page::Leaf { rows, .. } => {
+                let (stored_rowid, _) = rows.get(*row_idx).ok_or_else(|| {
+                    into_rusqlite_error(
+                        QueryError::ChildIndexOutOfBounds {
+                            index: *row_idx,
+                            len: rows.len(),
+                        }
+                        .into(),
+                    )
+                })?;
+                Ok(*stored_rowid)
+            }
+            beech_core::Page::Branch { .. } => Err(into_rusqlite_error(
+                QueryError::UnexpectedPageType {
+                    expected: "leaf",
+                    got: "branch",
+                }
+                .into(),
+            )),
+        }
     }
 }
 
