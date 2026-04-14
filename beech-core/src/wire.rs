@@ -47,30 +47,30 @@ fn is_record_scheme(schema: &Schema) -> bool {
     matches!(schema, Schema::Record(_))
 }
 
-fn wire_page_schema() -> Schema {
+fn wire_page_schema() -> Result<Schema> {
     // TODO: at some point, let's vendor int the Avro stuff,
     // so that we can control the output of AvroSchema.
     // otherwise mayebe we can convice the upstream maintainers
     // to add a flag to control type better.
 
-    let original = WirePage::get_schema();
-    if let Schema::Record(mut record) = original {
-        // the default schema for the fields "keys" and "rows" is not "bytes",
-        // but rather an array of integers.  Find those fields and replace them
-        let fields = record.fields.iter().map(|field| {
-            if &field.name == "keys" || &field.name == "rows" {
-                let mut new_field = field.clone();
-                new_field.schema = Schema::Bytes;
-                new_field
-            } else {
-                field.clone()
-            }
-        });
-        record.fields = fields.collect();
-        Schema::Record(record)
-    } else {
-        panic!("expected record schema");
-    }
+    let Schema::Record(mut record) = WirePage::get_schema() else {
+        return Err(
+            SchemaError::Mismatch("WirePage derived schema is not a record".to_string()).into(),
+        );
+    };
+    // the default schema for the fields "keys" and "rows" is not "bytes",
+    // but rather an array of integers.  Find those fields and replace them
+    let fields = record.fields.iter().map(|field| {
+        if &field.name == "keys" || &field.name == "rows" {
+            let mut new_field = field.clone();
+            new_field.schema = Schema::Bytes;
+            new_field
+        } else {
+            field.clone()
+        }
+    });
+    record.fields = fields.collect();
+    Ok(Schema::Record(record))
 }
 fn array_scheme_from_scheme(schema: &Schema) -> Schema {
     Schema::Array(ArraySchema {
@@ -177,7 +177,7 @@ pub fn encode_page(
         }
     }
 
-    let bytes = to_avro_datum(&wire_page_schema(), to_value(wp)?)?;
+    let bytes = to_avro_datum(&wire_page_schema()?, to_value(wp)?)?;
     Ok(bytes)
 }
 
@@ -221,7 +221,7 @@ pub fn decode_page<R: Read>(
     key_scheme: &Schema,
     row_scheme: &Schema,
 ) -> Result<Page> {
-    let wp_value = from_avro_datum(&wire_page_schema(), reader, None)?;
+    let wp_value = from_avro_datum(&wire_page_schema()?, reader, None)?;
     let wp: WirePage = from_value(&wp_value)?;
     let is_leaf = wp.children.is_empty();
     if is_leaf {

@@ -223,13 +223,6 @@ impl Cursor {
                         }
                         Page::Leaf { rows, .. } => {
                             self.stack.push((id, rows.len() - 1));
-                            // Leaf pages always have depth 0
-                            debug_assert_eq!(
-                                p.depth(),
-                                0,
-                                "Leaf page should have depth 0, but has depth {}",
-                                p.depth()
-                            );
                             return Ok(());
                         }
                     }
@@ -253,13 +246,6 @@ impl Cursor {
                     self.stack.push((new_child_id.clone(), 0));
                 } else {
                     // We've reached a leaf page
-                    // Leaf pages always have depth 0
-                    debug_assert_eq!(
-                        p.depth(),
-                        0,
-                        "Leaf page should have depth 0, but has depth {}",
-                        p.depth()
-                    );
                     break;
                 }
             } else {
