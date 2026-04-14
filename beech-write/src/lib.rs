@@ -285,7 +285,7 @@ fn build_leaf_page(rows: Vec<RowRecord>, shaper: &ProbShaper) -> Result<BuiltPag
         );
     }
 
-    let id: Id = shaper.clone().id().into();
+    let id: Id = shaper.id().into();
 
     let keys: Vec<Key> = rows.iter().map(|r| r.key.clone()).collect();
     let highest_key = keys
@@ -321,7 +321,7 @@ fn build_branch_page(children: Vec<PageSummary>, shaper: &ProbShaper) -> Result<
         .into());
     }
 
-    let id: Id = shaper.clone().id().into();
+    let id: Id = shaper.id().into();
 
     let highest_key = children
         .last()
