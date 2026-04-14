@@ -363,7 +363,7 @@ impl BeechCursor {
             let page = self.source.get_page(page_id, &self.cursor.table.schema)?;
 
             match &*page {
-                beech_core::Page::Leaf { rows, .. } => {
+                beech_core::Node::Leaf { rows, .. } => {
                     if let Some(row) = rows.get(*row_idx) {
                         // Row is (i64, Vec<Value>) - get the values
                         Ok(Some(row.1.clone()))
@@ -371,7 +371,7 @@ impl BeechCursor {
                         Ok(None)
                     }
                 }
-                beech_core::Page::Branch { .. } => Err(QueryError::UnexpectedPageType {
+                beech_core::Node::Branch { .. } => Err(QueryError::UnexpectedPageType {
                     expected: "leaf",
                     got: "branch",
                 }
@@ -478,7 +478,7 @@ unsafe impl VTabCursor for BeechCursor {
             .get_page(page_id, &self.cursor.table.schema)
             .map_err(into_rusqlite_error)?;
         match &*page {
-            beech_core::Page::Leaf { rows, .. } => {
+            beech_core::Node::Leaf { rows, .. } => {
                 let (stored_rowid, _) = rows.get(*row_idx).ok_or_else(|| {
                     into_rusqlite_error(
                         QueryError::ChildIndexOutOfBounds {
@@ -490,7 +490,7 @@ unsafe impl VTabCursor for BeechCursor {
                 })?;
                 Ok(*stored_rowid)
             }
-            beech_core::Page::Branch { .. } => Err(into_rusqlite_error(
+            beech_core::Node::Branch { .. } => Err(into_rusqlite_error(
                 QueryError::UnexpectedPageType {
                     expected: "leaf",
                     got: "branch",

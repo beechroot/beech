@@ -1,6 +1,6 @@
 use super::Result;
 use super::{
-    BackingStore, DomainError, Id, NodeSource, Page, Root, StorageError, Table, TableSchema,
+    BackingStore, DomainError, Id, Node, NodeSource, Root, StorageError, Table, TableSchema,
     Transaction,
     wire::{decode_page, decode_root, decode_table, decode_transaction},
 };
@@ -60,7 +60,7 @@ where
                 })?;
         self.get_table_by_id(table_id)
     }
-    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Page>> {
+    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
         let Some(page_bytes) = self.store.get(page_id)? else {
             return Err(StorageError::key_not_found("page", page_id.clone()).into());
         };

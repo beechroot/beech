@@ -1,4 +1,4 @@
-use crate::{Id, Key, NodeSource, Page, QueryError, Result, Table};
+use crate::{Id, Key, Node, NodeSource, QueryError, Result, Table};
 use apache_avro::AvroSchema;
 use apache_avro::types::Value;
 use ordered_float::OrderedFloat;
@@ -216,12 +216,12 @@ impl Cursor {
                 Some((id, _)) => {
                     let p = source.get_page(&id, &self.table.schema)?;
                     match &*p {
-                        Page::Branch { children, .. } => {
-                            let next_child_idx = children.len() - 1;
-                            self.stack.push((id, next_child_idx));
-                            self.stack.push((children[next_child_idx].clone(), 0))
+                        Node::Branch { children, .. } => {
+                            let next_slot = children.len() - 1;
+                            self.stack.push((id, next_slot));
+                            self.stack.push((children[next_slot].clone(), 0))
                         }
-                        Page::Leaf { rows, .. } => {
+                        Node::Leaf { rows, .. } => {
                             self.stack.push((id, rows.len() - 1));
                             return Ok(());
                         }
@@ -236,7 +236,7 @@ impl Cursor {
             let p = source.get_page(id, &self.table.schema)?;
             if let Some(new_child) = self.find_next_child(&p, *child) {
                 self.stack.push((id.clone(), new_child));
-                if let Page::Branch { children, .. } = &*p {
+                if let Node::Branch { children, .. } = &*p {
                     let new_child_id = children.get(new_child).ok_or_else(|| {
                         QueryError::ChildIndexOutOfBounds {
                             index: new_child,
@@ -255,7 +255,7 @@ impl Cursor {
         Ok(())
     }
 
-    fn find_next_child(&mut self, p: &Page, starting_child: usize) -> Option<usize> {
+    fn find_next_child(&mut self, p: &Node, starting_child: usize) -> Option<usize> {
         let s = &p.keys()[starting_child..];
         let location_result = s.binary_search_by(|e| {
             if self.should_skip(&self.lower_bound, e) {
@@ -286,7 +286,7 @@ impl Cursor {
                 Some((id, child)) => {
                     let (last_child, new_lower_bound) = {
                         let p = source.get_page(id, &self.table.schema)?;
-                        (p.last_child(), p.keys().get(*child).cloned())
+                        (p.max_index(), p.keys().get(*child).cloned())
                     };
                     self.lower_bound = new_lower_bound;
                     if *child < last_child {

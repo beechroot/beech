@@ -1,5 +1,5 @@
 use apache_avro::{types::Value, Schema};
-use beech_core::{Id, Key, NodeSource, Page};
+use beech_core::{Id, Key, Node, NodeSource};
 use beech_write::{infer_row_schema_from_record, write_rows_to_prolly_tree, Writer};
 use clap::Parser;
 #[cfg(test)]
@@ -388,7 +388,7 @@ fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow
 
     // Create the inspection structure
     let inspection = match &*page {
-        Page::Leaf { keys, rows } => PageInspection {
+        Node::Leaf { keys, rows } => PageInspection {
             page_id: page_id.to_string(),
             page_type: "leaf".to_string(),
             num_keys: keys.len(),
@@ -396,7 +396,7 @@ fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow
             children: None,
             keys: keys.iter().map(|k| format!("{:?}", k)).collect(),
         },
-        Page::Branch { keys, children, .. } => PageInspection {
+        Node::Branch { keys, children, .. } => PageInspection {
             page_id: page_id.to_string(),
             page_type: "branch".to_string(),
             num_keys: keys.len(),
@@ -547,7 +547,7 @@ mod tests {
         let mut retrieved_rows = Vec::new();
         if let Some(root_id) = &table.root {
             let page = node_source.get_page(root_id, &table.schema).unwrap();
-            if let Page::Leaf { rows, .. } = page.as_ref() {
+            if let Node::Leaf { rows, .. } = page.as_ref() {
                 for (row_id, row_values) in rows {
                     let record = Value::Record(vec![
                         ("name".to_string(), row_values[0].clone()),
@@ -698,7 +698,7 @@ mod tests {
         while !cursor.eof() {
             let (page_id, row_index) = cursor.current().unwrap();
             let page = node_source.get_page(page_id, &table.schema).unwrap();
-            let Page::Leaf { rows, .. } = page.as_ref() else {
+            let Node::Leaf { rows, .. } = page.as_ref() else {
                 panic!("Expected leaf page, got branch page");
             };
             let (row_id, row_values) = rows.get(*row_index).unwrap();
@@ -732,7 +732,7 @@ mod tests {
             assert!(!bounded_cursor.eof(), "Bounded cursor should not be at EOF");
             let (page_id, row_index) = bounded_cursor.current().unwrap();
             let page = node_source.get_page(page_id, &table.schema).unwrap();
-            let Page::Leaf { rows, .. } = page.as_ref() else {
+            let Node::Leaf { rows, .. } = page.as_ref() else {
                 panic!("Expected leaf page, got branch page");
             };
             let (row_id, row_values) = rows.get(*row_index).unwrap();

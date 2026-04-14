@@ -6,7 +6,7 @@ use apache_avro::{
 use beech_core::{
     query::{Constraint, ConstraintOp, Cursor},
     wire::{encode_page, encode_root, encode_table, encode_transaction, find_key_columns},
-    DomainError, Id, Key, KeyOrdering, NodeSource, Page, QueryError, Result, Root, Row,
+    DomainError, Id, Key, KeyOrdering, Node, NodeSource, QueryError, Result, Root, Row,
     SchemaError, Table, TableSchema, Transaction,
 };
 use beech_shaper::ProbShaper;
@@ -149,7 +149,7 @@ where
         let leaf_page = node_source.get_page(leaf_id, &table.schema)?;
 
         // Determine the highest key in this leaf to know when to stop collecting changes
-        let Page::Leaf { keys, rows } = &*leaf_page else {
+        let Node::Leaf { keys, rows } = &*leaf_page else {
             return Err(QueryError::UnexpectedPageType {
                 expected: "leaf",
                 got: "branch",
@@ -421,7 +421,7 @@ fn write_branch_page<W: Writer>(
     let page_id = Id::from(id_bytes);
 
     // Create and write the branch page
-    let page = Page::Branch {
+    let page = Node::Branch {
         keys,
         children: child_ids,
         depth,
@@ -565,7 +565,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
                     .map(|(row_id, _, values)| (row_id, values))
                     .collect();
 
-                let page = Page::Leaf {
+                let page = Node::Leaf {
                     keys,
                     rows: leaf_rows.clone(),
                 };
@@ -620,7 +620,7 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
             let depth = max_child_depth + 1;
             let row_count = total_row_count;
 
-            let page = Page::Branch {
+            let page = Node::Branch {
                 keys,
                 children,
                 depth,

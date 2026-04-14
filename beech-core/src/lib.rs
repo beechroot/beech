@@ -157,7 +157,7 @@ pub struct Root {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Page {
+pub enum Node {
     Branch {
         keys: Vec<Key>,
         children: Vec<Id>,
@@ -170,32 +170,32 @@ pub enum Page {
     },
 }
 
-impl Page {
+impl Node {
     pub fn keys(&self) -> &[Key] {
         match self {
-            Page::Branch { keys, .. } => keys,
-            Page::Leaf { keys, .. } => keys,
+            Node::Branch { keys, .. } => keys,
+            Node::Leaf { keys, .. } => keys,
         }
     }
     pub fn is_leaf(&self) -> bool {
-        matches!(self, Page::Leaf { .. })
+        matches!(self, Node::Leaf { .. })
     }
-    pub fn last_child(&self) -> usize {
+    pub fn max_index(&self) -> usize {
         match self {
-            Page::Leaf { rows, .. } => rows.len() - 1,
-            Page::Branch { children, .. } => children.len() - 1,
+            Node::Leaf { rows, .. } => rows.len() - 1,
+            Node::Branch { children, .. } => children.len() - 1,
         }
     }
     pub fn depth(&self) -> i32 {
         match self {
-            Page::Branch { depth, .. } => *depth,
-            Page::Leaf { .. } => 0, // Leaf pages always have depth 0
+            Node::Branch { depth, .. } => *depth,
+            Node::Leaf { .. } => 0, // Leaf pages always have depth 0
         }
     }
     pub fn row_count(&self) -> i64 {
         match self {
-            Page::Branch { row_count, .. } => *row_count,
-            Page::Leaf { rows, .. } => rows.len() as i64, // Computed from rows
+            Node::Branch { row_count, .. } => *row_count,
+            Node::Leaf { rows, .. } => rows.len() as i64, // Computed from rows
         }
     }
 }
@@ -331,7 +331,7 @@ pub trait NodeSource {
     fn get_root(&self) -> Result<Arc<Root>>;
     fn get_transaction(&self, transaction_id: &Id) -> Result<Arc<Transaction>>;
     fn get_table(&self, transaction: &Transaction, table_name: &str) -> Result<Arc<Table>>;
-    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Page>>;
+    fn get_page(&self, node_id: &Id, schema: &TableSchema) -> Result<Arc<Node>>;
 }
 
 pub trait BackingStore<K> {

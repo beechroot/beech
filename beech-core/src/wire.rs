@@ -1,4 +1,4 @@
-use crate::{Id, Page, Result, Root, SchemaError, Table, TableSchema, Transaction, WireError};
+use crate::{Id, Node, Result, Root, SchemaError, Table, TableSchema, Transaction, WireError};
 use apache_avro::schema::{ArraySchema, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::{AvroSchema, Schema, from_avro_datum, from_value, to_avro_datum, to_value};
@@ -142,13 +142,13 @@ fn encode_record_array<W: Write>(
     writer.write_all(&bytes)?;
     Ok(())
 }
-pub fn encode_page(page: &Page, id: Id, schema: &TableSchema) -> Result<Vec<u8>> {
+pub fn encode_page(page: &Node, id: Id, schema: &TableSchema) -> Result<Vec<u8>> {
     assert!(is_record_scheme(&schema.key_scheme));
     assert!(is_record_scheme(&schema.row_scheme));
     let mut wp = WirePage::default();
     wp.id = id;
     match page {
-        Page::Branch {
+        Node::Branch {
             keys,
             children,
             depth,
@@ -161,7 +161,7 @@ pub fn encode_page(page: &Page, id: Id, schema: &TableSchema) -> Result<Vec<u8>>
             encode_record_array(&mut writer, &schema.key_scheme, keys)?;
             wp.keys = writer;
         }
-        Page::Leaf { rows, .. } => {
+        Node::Leaf { rows, .. } => {
             wp.depth = 0; // Leaf pages always have depth 0
             wp.row_count = rows.len() as i64; // Computed from rows
             let (rowids, rows): (Vec<_>, Vec<_>) = rows.clone().into_iter().unzip();
@@ -211,7 +211,7 @@ fn decode_record_array(scheme: &Schema, data: &[u8]) -> Result<Vec<Vec<Value>>> 
         .collect()
 }
 
-pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Page> {
+pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Node> {
     let wp_value = from_avro_datum(&wire_page_schema()?, reader, None)?;
     let wp: WirePage = from_value(&wp_value)?;
     let is_leaf = wp.children.is_empty();
@@ -226,7 +226,7 @@ pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Page
             .map(|row| key_from_row(&key_columns, row))
             .collect();
         let ids_and_rows: Vec<_> = wp.rowids.into_iter().zip(rows).collect();
-        Ok(Page::Leaf {
+        Ok(Node::Leaf {
             keys,
             rows: ids_and_rows,
         })
@@ -235,7 +235,7 @@ pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Page
         if keys.len() + 1 != wp.children.len() {
             return Err(WireError::Malformed("branch keys/children length mismatch").into());
         }
-        Ok(Page::Branch {
+        Ok(Node::Branch {
             keys,
             children: wp.children,
             depth: wp.depth,
@@ -351,11 +351,11 @@ mod tests {
             (1001, vec![Value::Int(2), Value::Int(200)]),
             (1002, vec![Value::Int(3), Value::Int(300)]),
         ];
-        let leaf = Page::Leaf {
+        let leaf = Node::Leaf {
             keys: keys.clone(),
             rows,
         };
-        let branch = Page::Branch {
+        let branch = Node::Branch {
             keys: keys.clone(),
             children: vec![10001.into(), 10002.into(), 10003.into(), 10004.into()],
             depth: 1,
