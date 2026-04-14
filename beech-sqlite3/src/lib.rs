@@ -17,7 +17,10 @@
 
 use apache_avro::{AvroSchema, Schema};
 use beech_core::query::IndexUsage;
-use beech_core::{BeechError, Column, Id, NodeSource, Table};
+use beech_core::{
+    BeechError, Column, DomainError, Id, NodeSource, QueryError, SchemaError, StorageError, Table,
+    WireError,
+};
 use log::debug;
 use rusqlite::Result;
 use rusqlite::ffi::ErrorCode;
@@ -100,17 +103,17 @@ fn from_hex(hex: &str) -> beech_core::Result<Vec<u8>> {
 
     let bytes = hex.as_bytes();
     if bytes.len() % 2 != 0 {
-        return Err(BeechError::Corrupt(
-            "hex string must have even length".to_string(),
-        ));
+        return Err(WireError::InvalidHex("odd-length hex string".to_string()).into());
     }
 
     let mut out = Vec::with_capacity(bytes.len() / 2);
     for i in (0..bytes.len()).step_by(2) {
-        let high =
-            decode_nibble(bytes[i]).ok_or(BeechError::Corrupt("invalid hex digit".to_string()))?;
-        let low = decode_nibble(bytes[i + 1])
-            .ok_or(BeechError::Corrupt("invalid hex digit".to_string()))?;
+        let high = decode_nibble(bytes[i]).ok_or_else(|| {
+            WireError::InvalidHex(format!("invalid digit: {:?}", bytes[i] as char))
+        })?;
+        let low = decode_nibble(bytes[i + 1]).ok_or_else(|| {
+            WireError::InvalidHex(format!("invalid digit: {:?}", bytes[i + 1] as char))
+        })?;
         out.push((high << 4) | low);
     }
     Ok(out)
@@ -140,10 +143,7 @@ fn avro_value_from_sqlite(value: ValueRef<'_>) -> beech_core::Result<apache_avro
         ValueRef::Null => Ok(Value::Null),
         ValueRef::Integer(i) => Ok(Value::Long(i)),
         ValueRef::Real(f) => Ok(Value::Double(f)),
-        ValueRef::Text(s) => Ok(Value::String(
-            String::from_utf8(s.to_vec())
-                .map_err(|_| BeechError::Corrupt("Invalid UTF-8".to_string()))?,
-        )),
+        ValueRef::Text(s) => Ok(Value::String(std::str::from_utf8(s).map(str::to_string)?)),
         ValueRef::Blob(b) => Ok(Value::Bytes(b.to_vec())),
     }
 }
@@ -169,18 +169,8 @@ impl BeechTable {
         let column_spec = {
             // Read the root file to get current transaction ID
             let root_file_path = data_path.join("root");
-            let transaction_id_str = std::fs::read_to_string(&root_file_path).map_err(|e| {
-                BeechError::NotFound(format!(
-                    "Failed to read root file at {}: {}",
-                    root_file_path.display(),
-                    e
-                ))
-            })?;
-
-            let transaction_id = Id::from_hex(transaction_id_str.trim()).map_err(|e| {
-                BeechError::Corrupt(format!("Invalid transaction ID in root file: {}", e))
-            })?;
-
+            let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
+            let transaction_id = Id::from_hex(transaction_id_str.trim())?;
             let transaction = source.get_transaction(&transaction_id)?;
             let tab = source.get_table(&transaction, remote_table_name)?;
 
@@ -199,9 +189,7 @@ impl BeechTable {
     fn do_best_index(&self, info: &mut IndexInfo) -> beech_core::Result<()> {
         // Read the root file to get current transaction ID
         let root_file_path = self.data_path.join("root");
-        let transaction_id_str = std::fs::read_to_string(&root_file_path)
-            .map_err(|e| BeechError::NotFound(format!("Failed to read root file: {}", e)))?;
-
+        let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
         let transaction_id = Id::from_hex(transaction_id_str.trim())?;
         let transaction = self.source.get_transaction(&transaction_id)?;
         let table = self
@@ -235,9 +223,7 @@ impl BeechTable {
     fn do_open(&self) -> beech_core::Result<BeechCursor> {
         // Read the root file to get current transaction ID
         let root_file_path = self.data_path.join("root");
-        let transaction_id_str = std::fs::read_to_string(&root_file_path)
-            .map_err(|e| BeechError::NotFound(format!("Failed to read root file: {}", e)))?;
-
+        let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
         let transaction_id = Id::from_hex(transaction_id_str.trim())?;
         let transaction = self.source.get_transaction(&transaction_id)?;
         let table = self
@@ -335,22 +321,25 @@ impl<'vtab> CreateVTab<'vtab> for BeechTable {
 }
 
 fn into_rusqlite_error(be: BeechError) -> rusqlite::Error {
-    match be {
-        BeechError::NotFound(s) => rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: ErrorCode::NotFound,
-                extended_code: 0,
-            },
-            Some(s),
-        ),
-        _ => rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: ErrorCode::DatabaseCorrupt,
-                extended_code: 0,
-            },
-            Some(be.to_string()),
-        ),
-    }
+    let message = be.to_string();
+    let code = match &be {
+        BeechError::Storage(StorageError::KeyNotFound { .. }) => ErrorCode::NotFound,
+        BeechError::Storage(StorageError::Io(_))
+        | BeechError::Storage(StorageError::Mmap { .. }) => ErrorCode::OperationInterrupted,
+        BeechError::Domain(DomainError::NoSuchTable { .. })
+        | BeechError::Domain(DomainError::KeyNotFound { .. }) => ErrorCode::NotFound,
+        BeechError::Domain(DomainError::DuplicateKey { .. }) => ErrorCode::ConstraintViolation,
+        BeechError::Domain(DomainError::InvalidArgs(_)) => ErrorCode::ApiMisuse,
+        BeechError::Schema(_) => ErrorCode::TypeMismatch,
+        BeechError::Wire(_) | BeechError::Query(_) => ErrorCode::DatabaseCorrupt,
+    };
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code,
+            extended_code: 0,
+        },
+        Some(message),
+    )
 }
 
 #[repr(C)]
@@ -386,9 +375,11 @@ impl BeechCursor {
                         Ok(None)
                     }
                 }
-                beech_core::Page::Branch { .. } => Err(BeechError::Corrupt(
-                    "Cursor pointing to branch node".to_string(),
-                )),
+                beech_core::Page::Branch { .. } => Err(QueryError::UnexpectedPageType {
+                    expected: "leaf",
+                    got: "branch",
+                }
+                .into()),
             }
         } else {
             Ok(None)
@@ -404,29 +395,22 @@ impl BeechCursor {
         let index_usage = if let Some(idx_str) = maybe_idx_str {
             let bytes = from_hex(idx_str)?;
             let schema = IndexUsage::get_schema();
-            let mut reader = apache_avro::Reader::with_schema(&schema, &bytes[..])
-                .map_err(|e| BeechError::Corrupt(format!("Failed to create Avro reader: {e}")))?;
+            let mut reader = apache_avro::Reader::with_schema(&schema, &bytes[..])?;
 
             if let Some(value_result) = reader.next() {
-                let value = value_result.map_err(|e| {
-                    BeechError::Corrupt(format!("Failed to decode IndexUsage: {e}"))
-                })?;
-                apache_avro::from_value::<IndexUsage>(&value).map_err(|e| {
-                    BeechError::Corrupt(format!("Failed to deserialize IndexUsage: {e}"))
-                })?
+                let value = value_result?;
+                apache_avro::from_value::<IndexUsage>(&value)?
             } else {
-                return Err(BeechError::Corrupt(
-                    "No IndexUsage value in encoded data".to_string(),
-                ));
+                return Err(WireError::Truncated.into());
             }
         } else {
             IndexUsage::new(self.cursor.table.id.clone())
         };
 
         if index_usage.table_id != self.cursor.table.id {
-            return Err(BeechError::SchemaMismatch(
-                "table schema mismatch".to_string(),
-            ));
+            return Err(
+                SchemaError::Mismatch("table id mismatch in IndexUsage".to_string()).into(),
+            );
         }
         debug!("beech_filter(): schema matches");
 

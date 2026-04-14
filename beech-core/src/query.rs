@@ -1,7 +1,6 @@
-
-use crate::{BeechError, Id, Key, NodeSource, Page, Result, Table};
-use apache_avro::types::Value;
+use crate::{Id, Key, NodeSource, Page, QueryError, Result, Table};
 use apache_avro::AvroSchema;
+use apache_avro::types::Value;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -10,14 +9,12 @@ use std::vec::Vec;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AvroSchema)]
 pub enum ConstraintOp {
     Eq,
-    Gt, 
+    Gt,
     Le,
     Lt,
     Ge,
     Unknown,
 }
-
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, AvroSchema)]
 pub struct Constraint {
@@ -136,7 +133,7 @@ impl Constraint {
         if !self.has_index {
             return false;
         }
-        
+
         match self.op {
             ConstraintOp::Gt | ConstraintOp::Eq | ConstraintOp::Ge => {
                 let ov1 = OrdValue(current_val);
@@ -171,9 +168,10 @@ impl Cursor {
         }
     }
 
-    pub fn init(&mut self, constraints:Vec<Constraint>, values: Vec<Value>) {
+    pub fn init(&mut self, constraints: Vec<Constraint>, values: Vec<Value>) {
         let key_size = self.table.key_columns.len();
-        let mut bound_constraints: Vec<Vec<(Constraint, Value)>> = vec![Default::default(); key_size];
+        let mut bound_constraints: Vec<Vec<(Constraint, Value)>> =
+            vec![Default::default(); key_size];
         for (mut c, v) in constraints.into_iter().zip(values) {
             if let Some(key_part_index) = self.table.column_key_index(c.column as usize) {
                 c.has_index = true;
@@ -184,7 +182,11 @@ impl Cursor {
         }
         self.constraints = bound_constraints;
         self.lower_bound = None;
-        self.stack = self.table.root.as_ref().map_or(Vec::new(), |r| vec![(r.clone(), 0)]);
+        self.stack = self
+            .table
+            .root
+            .as_ref()
+            .map_or(Vec::new(), |r| vec![(r.clone(), 0)]);
     }
 
     /// Advance cursor to the next leaf page
@@ -193,7 +195,7 @@ impl Cursor {
         // Move to the next position using existing logic
         self.advance_stack(source)?;
         self.advance_to_left(source)?;
-        
+
         // Check if we've moved beyond our constraints
         if let Some((id, child)) = &self.stack.last() {
             let p = source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
@@ -204,7 +206,7 @@ impl Cursor {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -223,9 +225,9 @@ impl Cursor {
                             self.stack.push((id, rows.len() - 1));
                             // Leaf pages always have depth 0
                             debug_assert_eq!(
-                                p.depth(), 
-                                0, 
-                                "Leaf page should have depth 0, but has depth {}", 
+                                p.depth(),
+                                0,
+                                "Leaf page should have depth 0, but has depth {}",
                                 p.depth()
                             );
                             return Ok(());
@@ -242,15 +244,20 @@ impl Cursor {
             if let Some(new_child) = self.find_next_child(&p, *child) {
                 self.stack.push((id.clone(), new_child));
                 if let Page::Branch { children, .. } = &*p {
-                    let new_child_id = children.get(new_child).ok_or_else(||BeechError::Corrupt(format!("child index out of bounds: {new_child}")))?;
+                    let new_child_id = children.get(new_child).ok_or_else(|| {
+                        QueryError::ChildIndexOutOfBounds {
+                            index: new_child,
+                            len: children.len(),
+                        }
+                    })?;
                     self.stack.push((new_child_id.clone(), 0));
                 } else {
                     // We've reached a leaf page
                     // Leaf pages always have depth 0
                     debug_assert_eq!(
-                        p.depth(), 
-                        0, 
-                        "Leaf page should have depth 0, but has depth {}", 
+                        p.depth(),
+                        0,
+                        "Leaf page should have depth 0, but has depth {}",
                         p.depth()
                     );
                     break;
@@ -292,7 +299,8 @@ impl Cursor {
             match &self.stack.pop() {
                 Some((id, child)) => {
                     let (last_child, new_lower_bound) = {
-                        let p = source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
+                        let p =
+                            source.get_page(id, &self.table.key_scheme, &self.table.row_scheme)?;
                         (p.last_child(), p.keys().get(*child).cloned())
                     };
                     self.lower_bound = new_lower_bound;
@@ -301,7 +309,7 @@ impl Cursor {
                         break;
                     }
                 }
-                None => return Err(BeechError::InternalError("empty stack".to_string())),
+                None => return Err(QueryError::EmptyStack.into()),
             }
         }
 
@@ -373,7 +381,13 @@ impl Cursor {
             })
             .unwrap_or(1);
 
-        for (i, (cs, end_part)) in self.constraints.iter().take(in_order_depth).zip(k_end).enumerate() {
+        for (i, (cs, end_part)) in self
+            .constraints
+            .iter()
+            .take(in_order_depth)
+            .zip(k_end)
+            .enumerate()
+        {
             for (c, v) in cs {
                 if let Some(start_part) = maybe_k_start.and_then(|k_start| k_start.get(i)) {
                     if c.after_end(v, start_part) {
@@ -411,7 +425,7 @@ impl IndexUsage {
             constraints: vec![],
         }
     }
-    pub fn constraint(&mut self, table: &Table, column:i32, op:ConstraintOp) -> bool {
+    pub fn constraint(&mut self, table: &Table, column: i32, op: ConstraintOp) -> bool {
         if table.column_key_index(column as usize).is_some() {
             self.constraints.push(Constraint {
                 column,

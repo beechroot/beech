@@ -1,4 +1,4 @@
-use beech_core::{BackingStore, BeechError, Id, Result};
+use beech_core::{BackingStore, Id, Result, StorageError};
 use beech_mem::mmap::MappedBuffer;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -79,18 +79,14 @@ impl BackingStore<Id> for FileBackingStore {
         match std::fs::File::open(&path) {
             Ok(file) => match MappedBuffer::from_file(&file) {
                 Ok(buffer) => Ok(Some(buffer)),
-                Err(e) => Err(BeechError::Corrupt(format!(
-                    "Failed to map file {}: {}",
-                    path.display(),
-                    e
-                ))),
+                Err(e) => Err(StorageError::Mmap {
+                    path: path.clone(),
+                    source: e,
+                }
+                .into()),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(BeechError::Corrupt(format!(
-                "Failed to open file {}: {}",
-                path.display(),
-                e
-            ))),
+            Err(e) => Err(e.into()),
         }
     }
 }

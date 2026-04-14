@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use apache_avro::Schema;
 use beech_core::wire::{decode_page, decode_root, decode_table, decode_transaction};
-use beech_core::{Id, Page, Result, Root, Table, Transaction};
+use beech_core::{DomainError, Id, Page, Result, Root, StorageError, Table, Transaction};
 
 /// Memory-backed writer for testing that doesn't write to filesystem
 pub struct Writer {
@@ -48,7 +48,7 @@ impl NodeSource {
         self.files
             .get(&filename)
             .cloned()
-            .ok_or_else(|| beech_core::err_corrupt("File not found"))
+            .ok_or_else(|| StorageError::key_not_found("file", id.clone()).into())
     }
 }
 
@@ -58,7 +58,7 @@ impl beech_core::NodeSource for NodeSource {
             let mut cursor = Cursor::new(data);
             Ok(Arc::new(decode_root(&mut cursor)?))
         } else {
-            Err(beech_core::err_corrupt("Root file not found"))
+            Err(StorageError::key_not_found("root", Default::default()).into())
         }
     }
 
@@ -74,7 +74,10 @@ impl beech_core::NodeSource for NodeSource {
             let mut cursor = Cursor::new(data);
             Ok(Arc::new(decode_table(&mut cursor)?))
         } else {
-            Err(beech_core::err_corrupt("Table not found in transaction"))
+            Err(DomainError::NoSuchTable {
+                name: table_name.to_string(),
+            }
+            .into())
         }
     }
 
@@ -97,19 +100,18 @@ impl beech_write::Writer for Writer {
     {
         self.write(name, data)
     }
-    
+
     fn commit(self) -> std::io::Result<()> {
         // For memory writer, commit is a no-op since everything is already in memory
         Ok(())
     }
-    
+
     fn abort(self) -> std::io::Result<()> {
         // For memory writer, abort just drops the data
         Ok(())
     }
-    
+
     fn num_to_commit(&self) -> usize {
         self.files.len()
     }
 }
-

@@ -244,7 +244,7 @@ fn replace_mode_load(
 }
 
 fn info_command(data_dir: PathBuf) -> anyhow::Result<()> {
-    use beech_core::{NodeSource, source::LocalFile};
+    use beech_core::{source::LocalFile, NodeSource};
 
     // Read the root file to get the current transaction ID
     let root_file_path = data_dir.join("root");
@@ -322,7 +322,7 @@ fn info_command(data_dir: PathBuf) -> anyhow::Result<()> {
 }
 
 fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow::Result<()> {
-    use beech_core::{NodeSource, source::LocalFile};
+    use beech_core::{source::LocalFile, NodeSource};
     use std::path::Path;
 
     // Determine if input is a file path or just a page ID
@@ -458,8 +458,6 @@ fn read_csv_to_records(path: &PathBuf, has_headers: bool) -> anyhow::Result<Vec<
 
     Ok(records)
 }
-
-
 
 #[cfg(test)]
 mod tests {

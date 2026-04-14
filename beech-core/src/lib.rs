@@ -6,15 +6,19 @@ use apache_avro::schema::derive::AvroSchemaComponent;
 use apache_avro::schema::{FixedSchema, Name, Namespace, RecordField, RecordSchema, Schema};
 use apache_avro::types::Value;
 use beech_mem::mmap::MappedBuffer;
-use thiserror::Error;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+pub mod error;
 pub mod query;
 pub mod source;
 #[cfg(feature = "serde")]
 pub mod wire;
+
+pub use error::{
+    BeechError, DomainError, QueryError, Result, SchemaError, StorageError, WireError,
+};
 
 pub type Row = (i64, Vec<Value>); // TODO: Avro doesn't support unsigned 64-bit integers
 pub type Key = Vec<Value>;
@@ -72,24 +76,19 @@ impl Id {
             .join("")
     }
 
-    pub fn from_hex(hex_str: &str) -> Result<Self> {
+    pub fn from_hex(hex_str: &str) -> std::result::Result<Self, WireError> {
         if hex_str.len() != 64 {
-            return Err(BeechError::InvalidFormat(format!(
-                "Invalid hex string length: expected 64, got {}",
+            return Err(WireError::InvalidHex(format!(
+                "expected 64 chars, got {}",
                 hex_str.len()
             )));
         }
 
         let mut bytes = [0u8; 32];
         for (i, chunk) in hex_str.as_bytes().chunks(2).enumerate() {
-            if i >= 32 {
-                return Err(BeechError::InvalidFormat("Hex string too long".to_string()));
-            }
-            let hex_pair = std::str::from_utf8(chunk).map_err(|_| {
-                BeechError::InvalidFormat("Invalid UTF-8 in hex string".to_string())
-            })?;
+            let hex_pair = std::str::from_utf8(chunk)?;
             bytes[i] = u8::from_str_radix(hex_pair, 16)
-                .map_err(|_| BeechError::InvalidFormat(format!("Invalid hex digit: {hex_pair}")))?;
+                .map_err(|_| WireError::InvalidHex(format!("invalid digit pair: {hex_pair}")))?;
         }
         Ok(Id(bytes))
     }
@@ -152,46 +151,6 @@ impl std::convert::From<[u8; 32]> for Id {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum BeechError {
-    #[error("nonzero sqlite3 result code: {}", code)]
-    Sqlite3 { code: i32 },
-    #[error("done")]
-    Done,
-    #[error("invalid argument(s): {0}")]
-    Args(String),
-    #[error("corrupt database: {0}")]
-    Corrupt(String),
-    #[error("HTTP result code :{}", code)]
-    Http { code: i32 },
-    #[error("unknown network failure")]
-    Network,
-    #[error("schema mismatch: {0}")]
-    SchemaMismatch(String),
-    #[error("no such table")]
-    NoSuchTable,
-    #[error("serialization error: {0}")]
-    Serialization(#[from] apache_avro::Error),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("object not found: {0}")]
-    NotFound(String),
-    #[error("internal error: {0}")]
-    InternalError(String),
-    #[error("duplicate key: {0}")]
-    DuplicateKey(String),
-    #[error("invalid format: {0}")]
-    InvalidFormat(String),
-    #[error("unsupported type: {0}")]
-    UnsupportedType(String),
-}
-
-pub fn err_corrupt(s: impl AsRef<str>) -> BeechError {
-    BeechError::Corrupt(s.as_ref().to_string())
-}
-
-pub type Result<T> = std::result::Result<T, BeechError>;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Root {
     pub id: Id,
@@ -251,26 +210,27 @@ pub struct Table {
     pub key_columns: Vec<(usize, Column)>,
     columns: Vec<Column>,
 }
-fn read_field_type(f: &RecordField) -> Result<Schema> {
+fn read_field_type(f: &RecordField) -> std::result::Result<Schema, SchemaError> {
     use apache_avro::Schema::*;
     match &f.schema {
         Union(u) => {
             if let &[Schema::Null, ref t] = u.variants() {
                 Ok(t.clone())
             } else {
-                Err(BeechError::SchemaMismatch(
-                    "invalid union schema".to_string(),
-                ))
+                Err(SchemaError::InvalidUnion(format!(
+                    "expected [null, T], got {:?}",
+                    u.variants()
+                )))
             }
         }
         Null | Boolean | Int | Long | Float | Double | Bytes | String | Fixed(_) | Decimal(_)
         | BigDecimal | Uuid | Date | TimeMillis | TimeMicros | TimestampMillis
         | TimestampMicros | TimestampNanos | LocalTimestampMillis | LocalTimestampMicros
         | LocalTimestampNanos | Duration => Ok(f.schema.clone()),
-        _ => Err(BeechError::SchemaMismatch(format!(
-            "invalid field type: {:?}",
-            f.schema
-        ))),
+        _ => Err(SchemaError::UnsupportedFieldType {
+            name: f.name.clone(),
+            schema: format!("{:?}", f.schema),
+        }),
     }
 }
 impl Table {
@@ -280,7 +240,7 @@ impl Table {
         root: Option<Id>,
         key_scheme: Schema,
         row_scheme: Schema,
-    ) -> Result<Table> {
+    ) -> std::result::Result<Table, SchemaError> {
         if let (
             Schema::Record(RecordSchema {
                 fields: key_fields, ..
@@ -303,7 +263,7 @@ impl Table {
                         typ: read_field_type(field)?,
                     })
                 })
-                .collect::<Result<_>>()?;
+                .collect::<std::result::Result<_, SchemaError>>()?;
             let key_columns = key_fields
                 .iter()
                 .map(|field| {
@@ -320,7 +280,7 @@ impl Table {
                         },
                     ))
                 })
-                .collect::<Result<_>>()?;
+                .collect::<std::result::Result<_, SchemaError>>()?;
             Ok(Table {
                 id,
                 name,
@@ -331,8 +291,8 @@ impl Table {
                 columns,
             })
         } else {
-            Err(BeechError::SchemaMismatch(
-                "invalid table schema, should be a record".to_string(),
+            Err(SchemaError::Mismatch(
+                "expected record schema for both key and row".to_string(),
             ))
         }
     }

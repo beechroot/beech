@@ -1,4 +1,4 @@
-use crate::{BeechError, Id, Page, Result, Root, Table, Transaction};
+use crate::{Id, Page, Result, Root, SchemaError, Table, Transaction, WireError};
 use apache_avro::schema::{ArraySchema, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::{AvroSchema, Schema, from_avro_datum, from_value, to_avro_datum, to_value};
@@ -117,13 +117,17 @@ fn encode_record_array<W: Write>(
     values: &[Vec<Value>],
 ) -> Result<()> {
     let Schema::Record(RecordSchema { fields, .. }) = scheme else {
-        return Err(BeechError::Corrupt("expected record schema while encoding record array".to_string()));
+        return Err(WireError::UnexpectedType {
+            expected: "record",
+            got: "non-record schema",
+        }
+        .into());
     };
     let records: Result<Vec<_>> = values
         .iter()
         .map(|row| {
             if row.len() != fields.len() {
-                return Err(BeechError::Corrupt("expected record with matching number of fields".to_string()));
+                return Err(WireError::Malformed("record field arity mismatch").into());
             }
             Ok(Value::Record(
                 fields
@@ -149,7 +153,12 @@ pub fn encode_page(
     let mut wp = WirePage::default();
     wp.id = id;
     match page {
-        Page::Branch { keys, children, depth, row_count } => {
+        Page::Branch {
+            keys,
+            children,
+            depth,
+            row_count,
+        } => {
             wp.children = children.to_vec();
             wp.depth = *depth;
             wp.row_count = *row_count;
@@ -158,8 +167,8 @@ pub fn encode_page(
             wp.keys = writer;
         }
         Page::Leaf { rows, .. } => {
-            wp.depth = 0;  // Leaf pages always have depth 0
-            wp.row_count = rows.len() as i64;  // Computed from rows
+            wp.depth = 0; // Leaf pages always have depth 0
+            wp.row_count = rows.len() as i64; // Computed from rows
             let (rowids, rows): (Vec<_>, Vec<_>) = rows.clone().into_iter().unzip();
             wp.rowids = rowids;
             let mut writer = Vec::new();
@@ -174,7 +183,11 @@ pub fn encode_page(
 
 fn try_from_array(value: Value) -> Result<Vec<Value>> {
     let Value::Array(values) = value else {
-        return Err(BeechError::Corrupt("expected array".to_string()));
+        return Err(WireError::UnexpectedType {
+            expected: "array",
+            got: "non-array",
+        }
+        .into());
     };
     Ok(values)
 }
@@ -192,7 +205,11 @@ fn decode_record_array(scheme: &Schema, data: &[u8]) -> Result<Vec<Vec<Value>>> 
         .into_iter()
         .map(|value| {
             let Value::Record(record) = value else {
-                return Err(BeechError::Corrupt("expected record while decoding record array".to_string()));
+                return Err(WireError::UnexpectedType {
+                    expected: "record",
+                    got: "non-record in record array",
+                }
+                .into());
             };
             Ok(record.into_iter().map(|(_name, value)| value).collect())
         })
@@ -210,7 +227,7 @@ pub fn decode_page<R: Read>(
     if is_leaf {
         let rows = decode_record_array(row_scheme, &wp.rows[..])?;
         if rows.len() != wp.rowids.len() {
-            return Err(BeechError::Corrupt("expected matching number of rows and rowids".to_string()));
+            return Err(WireError::Malformed("leaf rows/rowids length mismatch").into());
         }
         let key_columns: Vec<usize> = find_key_columns(key_scheme, row_scheme)?;
         let keys: Vec<Vec<_>> = rows
@@ -225,7 +242,7 @@ pub fn decode_page<R: Read>(
     } else {
         let keys: Vec<Vec<_>> = decode_record_array(key_scheme, &wp.keys[..])?;
         if keys.len() + 1 != wp.children.len() {
-            return Err(BeechError::Corrupt("expected congruent number of keys and children".to_string()));
+            return Err(WireError::Malformed("branch keys/children length mismatch").into());
         }
         Ok(Page::Branch {
             keys,
@@ -247,13 +264,15 @@ pub fn find_key_columns(key_scheme: &Schema, row_scheme: &Schema) -> Result<Vec<
             .iter()
             .filter_map(|field| {
                 // Find the row column index for this key field
-                row_record
-                    .fields
-                    .iter()
-                    .position(|f| f.name == field.name)
+                row_record.fields.iter().position(|f| f.name == field.name)
             })
             .collect(),
-        _ => return Err(BeechError::SchemaMismatch("expected record schema while finding key columns".to_string())),
+        _ => {
+            return Err(SchemaError::Mismatch(
+                "expected record schema while finding key columns".to_string(),
+            )
+            .into());
+        }
     };
     Ok(key_columns)
 }
@@ -282,13 +301,13 @@ pub fn decode_table<R: Read>(reader: &mut R) -> Result<Table> {
 
     let key_scheme = Schema::parse_str(&wire_table.key_scheme)?;
     let row_scheme = Schema::parse_str(&wire_table.row_scheme)?;
-    Table::new(
+    Ok(Table::new(
         wire_table.id,
         wire_table.name,
         wire_table.root,
         key_scheme,
         row_scheme,
-    )
+    )?)
 }
 
 pub fn encode_root(root: &Root) -> Result<Vec<u8>> {
