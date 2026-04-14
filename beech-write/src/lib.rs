@@ -6,8 +6,8 @@ use apache_avro::{
 use beech_core::{
     query::{Constraint, ConstraintOp, Cursor},
     wire::{encode_page, encode_root, encode_table, encode_transaction, find_key_columns},
-    DomainError, Id, Key, KeyOrdering, Node, NodeSource, QueryError, Result, Root, Row,
-    SchemaError, Table, TableSchema, Transaction,
+    DomainError, Id, InternalNode, Key, KeyOrdering, LeafEntry, LeafNode, Node, NodeSource,
+    QueryError, Result, Root, SchemaError, Table, TableSchema, Transaction,
 };
 use beech_shaper::ProbShaper;
 use itertools::Itertools;
@@ -107,9 +107,9 @@ where
     if table.root.is_none() {
         let updated_pages = apply_changes_to_leaf(
             &[],
-            &[],
             changes,
             &table.schema,
+            table,
             target_page_size,
             page_size_stddev,
         )?;
@@ -149,14 +149,14 @@ where
         let leaf_page = node_source.get_page(leaf_id, &table.schema)?;
 
         // Determine the highest key in this leaf to know when to stop collecting changes
-        let Node::Leaf { keys, rows } = &*leaf_page else {
+        let Node::Leaf(leaf) = &*leaf_page else {
             return Err(QueryError::UnexpectedPageType {
                 expected: "leaf",
                 got: "branch",
             }
             .into());
         };
-        let Some(leaf_highest_key) = keys.last() else {
+        let Some(leaf_highest_key) = leaf.keys.last() else {
             return Err(QueryError::Malformed("empty leaf page").into());
         };
 
@@ -176,10 +176,10 @@ where
         });
 
         let updated_pages = apply_changes_to_leaf(
-            keys,
-            rows,
+            &leaf.entries,
             leaf_changes_iter,
             &table.schema,
+            table,
             target_page_size,
             page_size_stddev,
         )?;
@@ -203,10 +203,10 @@ where
     // Handle any remaining changes that go beyond existing leaves
     if changes.peek().is_some() {
         let remaining_pages = apply_changes_to_leaf(
-            &[], // No existing keys for new leaves
-            &[], // No existing rows for new leaves
+            &[], // No existing entries for new leaves
             changes,
             &table.schema,
+            table,
             target_page_size,
             page_size_stddev,
         )?;
@@ -235,10 +235,10 @@ where
 
 // Helper functions that would need to be implemented
 fn apply_changes_to_leaf<I>(
-    existing_keys: &[Key],
-    existing_rows: &[Row],
+    existing_entries: &[LeafEntry],
     changes: I,
     _schema: &TableSchema,
+    table: &Table,
     target_page_size: usize,
     page_size_stddev: usize,
 ) -> Result<Vec<PageMetadata>>
@@ -250,8 +250,8 @@ where
     let mut records: Vec<(Key, (i64, Vec<Value>))> = Vec::new();
 
     // Load existing records
-    for (key, (row_id, row_values)) in existing_keys.iter().zip(existing_rows.iter()) {
-        records.push((key.clone(), (*row_id, row_values.clone())));
+    for entry in existing_entries {
+        records.push((entry.key(table), entry.row.clone()));
     }
 
     // Step 2: Apply all changes to the records
@@ -421,12 +421,12 @@ fn write_branch_page<W: Writer>(
     let page_id = Id::from(id_bytes);
 
     // Create and write the branch page
-    let page = Node::Branch {
+    let page = Node::Internal(InternalNode {
         keys,
         children: child_ids,
-        depth,
-        row_count,
-    };
+        subtree_height: depth as u32,
+        subtree_row_count: row_count as u64,
+    });
 
     let page_bytes = encode_page(&page, page_id.clone(), schema)?;
     writer.write(file_name(&page_id), &page_bytes)?;
@@ -559,16 +559,18 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
                     .reduce(|acc, key| acc.max_key(key))
                     .ok_or_else(|| QueryError::Malformed("empty leaf page after split"))?;
 
-                // Convert to the format expected by Page::Leaf
-                let leaf_rows: Vec<(i64, Vec<Value>)> = page_rows
+                let entries: Vec<LeafEntry> = page_rows
                     .into_iter()
-                    .map(|(row_id, _, values)| (row_id, values))
+                    .map(|(row_id, _, values)| LeafEntry {
+                        row: (row_id, values),
+                    })
                     .collect();
+                let entry_count = entries.len() as i64;
 
-                let page = Node::Leaf {
-                    keys,
-                    rows: leaf_rows.clone(),
-                };
+                let page = Node::Leaf(LeafNode {
+                    keys: keys.clone(),
+                    entries,
+                });
 
                 let page_bytes = encode_page(&page, page_id.clone(), &schema)?;
                 writer.write(file_name(&page_id), &page_bytes)?;
@@ -576,8 +578,8 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
                 pages.push(PageMetadata {
                     id: page_id,
                     highest_key,
-                    depth: 0,                          // Leaf pages always have depth 0
-                    row_count: leaf_rows.len() as i64, // Count of rows in this leaf
+                    depth: 0, // Leaf pages always have depth 0
+                    row_count: entry_count,
                 });
             }
             None => break,
@@ -620,12 +622,12 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
             let depth = max_child_depth + 1;
             let row_count = total_row_count;
 
-            let page = Node::Branch {
+            let page = Node::Internal(InternalNode {
                 keys,
                 children,
-                depth,
-                row_count,
-            };
+                subtree_height: depth as u32,
+                subtree_row_count: row_count as u64,
+            });
             let page_bytes = encode_page(&page, page_id.clone(), &schema)?;
             writer.write(file_name(&page_id), &page_bytes)?;
 

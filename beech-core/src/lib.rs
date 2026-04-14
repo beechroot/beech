@@ -158,46 +158,266 @@ pub struct Root {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
-    Branch {
-        keys: Vec<Key>,
-        children: Vec<Id>,
-        depth: i32,
-        row_count: i64,
-    },
-    Leaf {
-        keys: Vec<Key>,
-        rows: Vec<Row>,
-    },
+    Internal(InternalNode),
+    Leaf(LeafNode),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InternalNode {
+    /// Separator keys for navigation.
+    ///
+    /// Current semantics preserved from your existing `Page::Branch`:
+    /// one key slot per child slot in traversal code.
+    pub keys: Vec<Key>,
+    pub children: Vec<Id>,
+
+    /// More explicit than `depth`.
+    /// 0 would mean leaf level, so internal nodes are typically >= 1.
+    pub subtree_height: u32,
+
+    /// Total number of rows reachable under this node.
+    pub subtree_row_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeafNode {
+    /// Keys derived from `entries` at decode time. Stored in parallel with `entries`
+    /// (one key per entry) so slice access is free after the one-time derivation.
+    pub keys: Vec<Key>,
+    pub entries: Vec<LeafEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeafEntry {
+    pub row: Row,
+}
+
+impl LeafEntry {
+    pub fn row_id(&self) -> i64 {
+        self.row.0
+    }
+
+    pub fn values(&self) -> &[Value] {
+        &self.row.1
+    }
+
+    pub fn into_row(self) -> Row {
+        self.row
+    }
+
+    /// Derive the logical key from the row using table metadata.
+    pub fn key(&self, table: &Table) -> Key {
+        derive_key_from_row(table, &self.row)
+    }
 }
 
 impl Node {
+    pub fn as_internal(&self) -> Option<&InternalNode> {
+        match self {
+            Node::Internal(n) => Some(n),
+            Node::Leaf(_) => None,
+        }
+    }
+
+    pub fn as_internal_mut(&mut self) -> Option<&mut InternalNode> {
+        match self {
+            Node::Internal(n) => Some(n),
+            Node::Leaf(_) => None,
+        }
+    }
+
+    pub fn as_leaf(&self) -> Option<&LeafNode> {
+        match self {
+            Node::Leaf(n) => Some(n),
+            Node::Internal(_) => None,
+        }
+    }
+
+    pub fn as_leaf_mut(&mut self) -> Option<&mut LeafNode> {
+        match self {
+            Node::Leaf(n) => Some(n),
+            Node::Internal(_) => None,
+        }
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, Node::Leaf(_))
+    }
+
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Node::Internal(_))
+    }
+
+    /// Number of navigable slots in this node.
+    ///
+    /// For internal nodes: number of child/key slots.
+    /// For leaf nodes: number of entries.
+    pub fn len(&self) -> usize {
+        match self {
+            Node::Internal(n) => n.len(),
+            Node::Leaf(n) => n.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn last_slot_index(&self) -> Option<usize> {
+        self.len().checked_sub(1)
+    }
+
+    /// Slice of keys for this node.
+    ///
+    /// For internal nodes these are separator keys (N-1 for N children).
+    /// For leaf nodes these are per-entry keys (one per entry), derived from the
+    /// rows at decode time and stored alongside them.
     pub fn keys(&self) -> &[Key] {
         match self {
-            Node::Branch { keys, .. } => keys,
-            Node::Leaf { keys, .. } => keys,
+            Node::Internal(n) => &n.keys,
+            Node::Leaf(n) => &n.keys,
         }
     }
-    pub fn is_leaf(&self) -> bool {
-        matches!(self, Node::Leaf { .. })
-    }
-    pub fn max_index(&self) -> usize {
-        match self {
-            Node::Leaf { rows, .. } => rows.len() - 1,
-            Node::Branch { children, .. } => children.len() - 1,
-        }
-    }
+
     pub fn depth(&self) -> i32 {
         match self {
-            Node::Branch { depth, .. } => *depth,
-            Node::Leaf { .. } => 0, // Leaf pages always have depth 0
+            Node::Internal(n) => n.subtree_height as i32,
+            Node::Leaf(_) => 0,
         }
     }
+
     pub fn row_count(&self) -> i64 {
         match self {
-            Node::Branch { row_count, .. } => *row_count,
-            Node::Leaf { rows, .. } => rows.len() as i64, // Computed from rows
+            Node::Internal(n) => n.subtree_row_count as i64,
+            Node::Leaf(n) => n.len() as i64,
         }
     }
+
+    /// Shared navigation view:
+    /// - internal nodes return stored separator keys
+    /// - leaf nodes derive keys from rows
+    pub fn key_at<'a>(&'a self, table: &'a Table, index: usize) -> Option<KeyRef<'a>> {
+        match self {
+            Node::Internal(n) => n.key_at(index).map(KeyRef::Stored),
+            Node::Leaf(n) => n.entry(index).map(|e| KeyRef::Derived { entry: e, table }),
+        }
+    }
+
+    /// Convenience helper if a caller truly wants owned keys.
+    pub fn owned_key_at(&self, table: &Table, index: usize) -> Option<Key> {
+        self.key_at(table, index).map(|k| k.to_owned_key())
+    }
+}
+
+impl InternalNode {
+    pub fn keys(&self) -> &[Key] {
+        &self.keys
+    }
+
+    pub fn children(&self) -> &[Id] {
+        &self.children
+    }
+
+    pub fn child_count(&self) -> usize {
+        self.children.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.children.len()
+    }
+
+    pub fn subtree_height(&self) -> u32 {
+        self.subtree_height
+    }
+
+    pub fn subtree_row_count(&self) -> u64 {
+        self.subtree_row_count
+    }
+
+    pub fn key_at(&self, index: usize) -> Option<&Key> {
+        self.keys.get(index)
+    }
+
+    pub fn child_at(&self, index: usize) -> Option<&Id> {
+        self.children.get(index)
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), WireError> {
+        if self.keys.len() != self.children.len() {
+            return Err(WireError::Malformed(
+                "internal node: keys and children counts disagree",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl LeafNode {
+    pub fn entries(&self) -> &[LeafEntry] {
+        &self.entries
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.entries.iter().map(|e| &e.row)
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn entry(&self, index: usize) -> Option<&LeafEntry> {
+        self.entries.get(index)
+    }
+
+    pub fn key_at(&self, table: &Table, index: usize) -> Option<Key> {
+        self.entry(index).map(|e| e.key(table))
+    }
+}
+
+/// A borrowed-or-derived key view.
+///
+/// Internal-node keys can be borrowed directly.
+/// Leaf keys are derived from the row/table pair on demand.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyRef<'a> {
+    Stored(&'a Key),
+    Derived {
+        entry: &'a LeafEntry,
+        table: &'a Table,
+    },
+}
+
+impl<'a> KeyRef<'a> {
+    pub fn to_owned_key(&self) -> Key {
+        match self {
+            KeyRef::Stored(k) => (*k).clone(),
+            KeyRef::Derived { entry, table } => entry.key(table),
+        }
+    }
+}
+
+/// Derive the logical key for a row from the table schema.
+///
+/// This uses `table.key_columns`, which already maps key-part order
+/// to row-column positions in your existing code.
+pub fn derive_key_from_row(table: &Table, row: &Row) -> Key {
+    let values = &row.1;
+    table
+        .key_columns
+        .iter()
+        .map(|(row_index, _column)| {
+            values.get(*row_index).cloned().unwrap_or_else(|| {
+                panic!(
+                    "row is missing key column at row index {} while deriving key",
+                    row_index
+                )
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +536,9 @@ impl Table {
 
     pub fn columns(&self) -> &[Column] {
         &self.columns[..]
+    }
+    pub fn derive_key(&self, row: &Row) -> Key {
+        derive_key_from_row(self, row)
     }
 }
 

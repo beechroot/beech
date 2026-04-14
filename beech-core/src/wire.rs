@@ -1,4 +1,7 @@
-use crate::{Id, Node, Result, Root, SchemaError, Table, TableSchema, Transaction, WireError};
+use crate::{
+    Id, InternalNode, Key, LeafEntry, LeafNode, Node, Result, Root, SchemaError, Table,
+    TableSchema, Transaction, WireError,
+};
 use apache_avro::schema::{ArraySchema, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::{AvroSchema, Schema, from_avro_datum, from_value, to_avro_datum, to_value};
@@ -148,23 +151,22 @@ pub fn encode_page(page: &Node, id: Id, schema: &TableSchema) -> Result<Vec<u8>>
     let mut wp = WirePage::default();
     wp.id = id;
     match page {
-        Node::Branch {
-            keys,
-            children,
-            depth,
-            row_count,
-        } => {
-            wp.children = children.to_vec();
-            wp.depth = *depth;
-            wp.row_count = *row_count;
+        Node::Internal(internal) => {
+            wp.children = internal.children.to_vec();
+            wp.depth = internal.subtree_height as i32;
+            wp.row_count = internal.subtree_row_count as i64;
             let mut writer = Vec::new();
-            encode_record_array(&mut writer, &schema.key_scheme, keys)?;
+            encode_record_array(&mut writer, &schema.key_scheme, &internal.keys)?;
             wp.keys = writer;
         }
-        Node::Leaf { rows, .. } => {
-            wp.depth = 0; // Leaf pages always have depth 0
-            wp.row_count = rows.len() as i64; // Computed from rows
-            let (rowids, rows): (Vec<_>, Vec<_>) = rows.clone().into_iter().unzip();
+        Node::Leaf(leaf) => {
+            wp.depth = 0;
+            wp.row_count = leaf.entries.len() as i64;
+            let (rowids, rows): (Vec<_>, Vec<_>) = leaf
+                .entries
+                .iter()
+                .map(|e| (e.row.0, e.row.1.clone()))
+                .unzip();
             wp.rowids = rowids;
             let mut writer = Vec::new();
             encode_record_array(&mut writer, &schema.row_scheme, &rows)?;
@@ -221,26 +223,30 @@ pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Node
             return Err(WireError::Malformed("leaf rows/rowids length mismatch").into());
         }
         let key_columns: Vec<usize> = find_key_columns(schema)?;
-        let keys: Vec<Vec<_>> = rows
+        let keys: Vec<Key> = rows
             .iter()
             .map(|row| key_from_row(&key_columns, row))
             .collect();
-        let ids_and_rows: Vec<_> = wp.rowids.into_iter().zip(rows).collect();
-        Ok(Node::Leaf {
-            keys,
-            rows: ids_and_rows,
-        })
+        let entries: Vec<LeafEntry> = wp
+            .rowids
+            .into_iter()
+            .zip(rows)
+            .map(|(row_id, values)| LeafEntry {
+                row: (row_id, values),
+            })
+            .collect();
+        Ok(Node::Leaf(LeafNode { keys, entries }))
     } else {
         let keys: Vec<Vec<_>> = decode_record_array(&schema.key_scheme, &wp.keys[..])?;
         if keys.len() + 1 != wp.children.len() {
             return Err(WireError::Malformed("branch keys/children length mismatch").into());
         }
-        Ok(Node::Branch {
+        Ok(Node::Internal(InternalNode {
             keys,
             children: wp.children,
-            depth: wp.depth,
-            row_count: wp.row_count,
-        })
+            subtree_height: wp.depth as u32,
+            subtree_row_count: wp.row_count as u64,
+        }))
     }
 }
 
@@ -351,16 +357,16 @@ mod tests {
             (1001, vec![Value::Int(2), Value::Int(200)]),
             (1002, vec![Value::Int(3), Value::Int(300)]),
         ];
-        let leaf = Node::Leaf {
+        let leaf = Node::Leaf(LeafNode {
             keys: keys.clone(),
-            rows,
-        };
-        let branch = Node::Branch {
+            entries: rows.into_iter().map(|row| LeafEntry { row }).collect(),
+        });
+        let branch = Node::Internal(InternalNode {
             keys: keys.clone(),
             children: vec![10001.into(), 10002.into(), 10003.into(), 10004.into()],
-            depth: 1,
-            row_count: 3,
-        };
+            subtree_height: 1,
+            subtree_row_count: 3,
+        });
 
         for page in [leaf, branch] {
             let schema = TableSchema {

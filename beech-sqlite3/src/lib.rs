@@ -363,15 +363,14 @@ impl BeechCursor {
             let page = self.source.get_page(page_id, &self.cursor.table.schema)?;
 
             match &*page {
-                beech_core::Node::Leaf { rows, .. } => {
-                    if let Some(row) = rows.get(*row_idx) {
-                        // Row is (i64, Vec<Value>) - get the values
-                        Ok(Some(row.1.clone()))
+                beech_core::Node::Leaf(leaf) => {
+                    if let Some(entry) = leaf.entry(*row_idx) {
+                        Ok(Some(entry.values().to_vec()))
                     } else {
                         Ok(None)
                     }
                 }
-                beech_core::Node::Branch { .. } => Err(QueryError::UnexpectedPageType {
+                beech_core::Node::Internal(_) => Err(QueryError::UnexpectedPageType {
                     expected: "leaf",
                     got: "branch",
                 }
@@ -478,19 +477,19 @@ unsafe impl VTabCursor for BeechCursor {
             .get_page(page_id, &self.cursor.table.schema)
             .map_err(into_rusqlite_error)?;
         match &*page {
-            beech_core::Node::Leaf { rows, .. } => {
-                let (stored_rowid, _) = rows.get(*row_idx).ok_or_else(|| {
+            beech_core::Node::Leaf(leaf) => {
+                let entry = leaf.entry(*row_idx).ok_or_else(|| {
                     into_rusqlite_error(
                         QueryError::ChildIndexOutOfBounds {
                             index: *row_idx,
-                            len: rows.len(),
+                            len: leaf.len(),
                         }
                         .into(),
                     )
                 })?;
-                Ok(*stored_rowid)
+                Ok(entry.row_id())
             }
-            beech_core::Node::Branch { .. } => Err(into_rusqlite_error(
+            beech_core::Node::Internal(_) => Err(into_rusqlite_error(
                 QueryError::UnexpectedPageType {
                     expected: "leaf",
                     got: "branch",

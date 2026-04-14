@@ -388,21 +388,21 @@ fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow
 
     // Create the inspection structure
     let inspection = match &*page {
-        Node::Leaf { keys, rows } => PageInspection {
+        Node::Leaf(leaf) => PageInspection {
             page_id: page_id.to_string(),
             page_type: "leaf".to_string(),
-            num_keys: keys.len(),
-            num_rows: Some(rows.len()),
+            num_keys: leaf.keys.len(),
+            num_rows: Some(leaf.len()),
             children: None,
-            keys: keys.iter().map(|k| format!("{:?}", k)).collect(),
+            keys: leaf.keys.iter().map(|k| format!("{:?}", k)).collect(),
         },
-        Node::Branch { keys, children, .. } => PageInspection {
+        Node::Internal(internal) => PageInspection {
             page_id: page_id.to_string(),
             page_type: "branch".to_string(),
-            num_keys: keys.len(),
+            num_keys: internal.keys.len(),
             num_rows: None,
-            children: Some(children.iter().map(|id| id.to_string()).collect()),
-            keys: keys.iter().map(|k| format!("{:?}", k)).collect(),
+            children: Some(internal.children.iter().map(|id| id.to_string()).collect()),
+            keys: internal.keys.iter().map(|k| format!("{:?}", k)).collect(),
         },
     };
 
@@ -547,14 +547,15 @@ mod tests {
         let mut retrieved_rows = Vec::new();
         if let Some(root_id) = &table.root {
             let page = node_source.get_page(root_id, &table.schema).unwrap();
-            if let Node::Leaf { rows, .. } = page.as_ref() {
-                for (row_id, row_values) in rows {
+            if let Node::Leaf(leaf) = page.as_ref() {
+                for entry in &leaf.entries {
+                    let row_values = entry.values();
                     let record = Value::Record(vec![
                         ("name".to_string(), row_values[0].clone()),
                         ("age".to_string(), row_values[1].clone()),
                         ("score".to_string(), row_values[2].clone()),
                     ]);
-                    retrieved_rows.push((*row_id, record));
+                    retrieved_rows.push((entry.row_id(), record));
                 }
             }
         }
@@ -698,17 +699,19 @@ mod tests {
         while !cursor.eof() {
             let (page_id, row_index) = cursor.current().unwrap();
             let page = node_source.get_page(page_id, &table.schema).unwrap();
-            let Node::Leaf { rows, .. } = page.as_ref() else {
+            let Node::Leaf(leaf) = page.as_ref() else {
                 panic!("Expected leaf page, got branch page");
             };
-            let (row_id, row_values) = rows.get(*row_index).unwrap();
+            let entry = leaf.entry(*row_index).unwrap();
+            let row_id = entry.row_id();
+            let row_values = entry.values();
             // Verify data integrity: row_id should match the value
             let Value::Long(value) = &row_values[0] else {
                 panic!("Expected Long value");
             };
-            assert_eq!(*row_id, *value);
+            assert_eq!(row_id, *value);
             // Since rows are now stored in key order, they should be sequential
-            assert_eq!(*row_id, count);
+            assert_eq!(row_id, count);
             count += 1;
             if count % 10000 == 0 {
                 debug!("Processed {count} rows");
@@ -732,12 +735,14 @@ mod tests {
             assert!(!bounded_cursor.eof(), "Bounded cursor should not be at EOF");
             let (page_id, row_index) = bounded_cursor.current().unwrap();
             let page = node_source.get_page(page_id, &table.schema).unwrap();
-            let Node::Leaf { rows, .. } = page.as_ref() else {
+            let Node::Leaf(leaf) = page.as_ref() else {
                 panic!("Expected leaf page, got branch page");
             };
-            let (row_id, row_values) = rows.get(*row_index).unwrap();
-            assert!(*row_id >= test_value);
-            assert_eq!(row_values[0], Value::Long(*row_id));
+            let entry = leaf.entry(*row_index).unwrap();
+            let row_id = entry.row_id();
+            let row_values = entry.values();
+            assert!(row_id >= test_value);
+            assert_eq!(row_values[0], Value::Long(row_id));
         }
     }
 }

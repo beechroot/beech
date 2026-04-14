@@ -197,10 +197,9 @@ impl Cursor {
         self.advance_to_left(source)?;
 
         // Check if we've moved beyond our constraints
-        if let Some((id, child)) = &self.stack.last() {
+        if let Some((id, slot)) = &self.stack.last() {
             let p = source.get_page(id, &self.table.schema)?;
-            let maybe_key = p.keys().get(*child);
-            if let Some(key) = maybe_key {
+            if let Some(key) = p.keys().get(*slot) {
                 if self.done_iterating(key) {
                     self.stack.clear();
                 }
@@ -216,13 +215,18 @@ impl Cursor {
                 Some((id, _)) => {
                     let p = source.get_page(&id, &self.table.schema)?;
                     match &*p {
-                        Node::Branch { children, .. } => {
-                            let next_slot = children.len() - 1;
-                            self.stack.push((id, next_slot));
-                            self.stack.push((children[next_slot].clone(), 0))
+                        Node::Internal(internal) => {
+                            let Some(last) = internal.len().checked_sub(1) else {
+                                return Ok(());
+                            };
+                            self.stack.push((id, last));
+                            self.stack.push((internal.children[last].clone(), 0));
                         }
-                        Node::Leaf { rows, .. } => {
-                            self.stack.push((id, rows.len() - 1));
+                        Node::Leaf(leaf) => {
+                            let Some(last) = leaf.len().checked_sub(1) else {
+                                return Ok(());
+                            };
+                            self.stack.push((id, last));
                             return Ok(());
                         }
                     }
@@ -232,15 +236,15 @@ impl Cursor {
         }
     }
     pub fn advance_to_left(&mut self, source: &dyn NodeSource) -> Result<()> {
-        while let Some((id, child)) = &self.stack.pop() {
+        while let Some((id, slot)) = &self.stack.pop() {
             let p = source.get_page(id, &self.table.schema)?;
-            if let Some(new_child) = self.find_next_child(&p, *child) {
-                self.stack.push((id.clone(), new_child));
-                if let Node::Branch { children, .. } = &*p {
-                    let new_child_id = children.get(new_child).ok_or_else(|| {
+            if let Some(new_slot) = self.find_next_slot(&p, *slot) {
+                self.stack.push((id.clone(), new_slot));
+                if let Node::Internal(internal) = &*p {
+                    let new_child_id = internal.child_at(new_slot).ok_or_else(|| {
                         QueryError::ChildIndexOutOfBounds {
-                            index: new_child,
-                            len: children.len(),
+                            index: new_slot,
+                            len: internal.children.len(),
                         }
                     })?;
                     self.stack.push((new_child_id.clone(), 0));
@@ -255,8 +259,9 @@ impl Cursor {
         Ok(())
     }
 
-    fn find_next_child(&mut self, p: &Node, starting_child: usize) -> Option<usize> {
-        let s = &p.keys()[starting_child..];
+    fn find_next_slot(&mut self, p: &Node, starting_slot: usize) -> Option<usize> {
+        let keys = p.keys();
+        let s = &keys[starting_slot..];
         let location_result = s.binary_search_by(|e| {
             if self.should_skip(&self.lower_bound, e) {
                 self.lower_bound = Some(e.clone());
@@ -272,8 +277,8 @@ impl Cursor {
         // since our predicate above never returns "Equal", binary_search_by
         // should always return Err
         let loc = location_result.unwrap_err();
-        let new_loc = loc + starting_child;
-        if new_loc >= p.keys().len() && p.is_leaf() {
+        let new_loc = loc + starting_slot;
+        if new_loc >= keys.len() && p.is_leaf() {
             None
         } else {
             Some(new_loc)
@@ -283,15 +288,17 @@ impl Cursor {
     fn advance_stack(&mut self, source: &dyn NodeSource) -> Result<()> {
         while !self.stack.is_empty() {
             match &self.stack.pop() {
-                Some((id, child)) => {
-                    let (last_child, new_lower_bound) = {
+                Some((id, slot)) => {
+                    let (last_slot, new_lower_bound) = {
                         let p = source.get_page(id, &self.table.schema)?;
-                        (p.max_index(), p.keys().get(*child).cloned())
+                        (p.last_slot_index(), p.keys().get(*slot).cloned())
                     };
                     self.lower_bound = new_lower_bound;
-                    if *child < last_child {
-                        self.stack.push((id.clone(), child + 1));
-                        break;
+                    if let Some(last_slot) = last_slot {
+                        if *slot < last_slot {
+                            self.stack.push((id.clone(), slot + 1));
+                            break;
+                        }
                     }
                 }
                 None => return Err(QueryError::EmptyStack.into()),
@@ -304,11 +311,9 @@ impl Cursor {
     pub fn next(&mut self, source: &dyn NodeSource) -> Result<()> {
         self.advance_stack(source)?;
         self.advance_to_left(source)?;
-        if let Some((id, child)) = &self.stack.last() {
+        if let Some((id, slot)) = &self.stack.last() {
             let p = source.get_page(id, &self.table.schema)?;
-
-            let maybe_key = p.keys().get(*child);
-            if let Some(key) = maybe_key {
+            if let Some(key) = p.keys().get(*slot) {
                 if self.done_iterating(key) {
                     self.stack.clear();
                 }
