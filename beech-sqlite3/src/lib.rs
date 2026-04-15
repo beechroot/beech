@@ -16,7 +16,8 @@
 //! ```
 
 use apache_avro::{AvroSchema, Schema};
-use beech_core::query::IndexUsage;
+use beech_core::plan::{AccessPlan, CandidateConstraint};
+use beech_core::query::{Constraint, ConstraintOp};
 use beech_core::{
     BeechError, Column, DomainError, Id, NodeSource, QueryError, SchemaError, StorageError, Table,
     WireError,
@@ -42,6 +43,18 @@ struct BeechTable {
     remote_table_name: String,
     source: Arc<dyn NodeSource>,
     data_path: PathBuf,
+    /// Snapshot of the table and total row count, captured at connect
+    /// time. Safe to hold for the vtab's lifetime: pages, tables, and
+    /// transactions are content-addressed and immutable; only the root
+    /// file is mutable. A vtab that snapshots at connect keeps serving
+    /// that snapshot until reopened.
+    meta: TableMeta,
+}
+
+struct TableMeta {
+    table: Arc<Table>,
+    /// `root.subtree_row_count` if the table has a root, else 0.
+    total_rows: i64,
 }
 fn avro_type_to_sqlite_type(typ: &Schema) -> &str {
     use apache_avro::Schema::*;
@@ -166,84 +179,129 @@ impl BeechTable {
         });
         let source = beech_core::source::LocalFile::new(store);
 
-        let column_spec = {
-            // Read the root file to get current transaction ID
-            let root_file_path = data_path.join("root");
-            let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
-            let transaction_id = Id::from_hex(transaction_id_str.trim())?;
-            let transaction = source.get_transaction(&transaction_id)?;
-            let tab = source.get_table(&transaction, remote_table_name)?;
-
-            let columns: Vec<String> = tab.columns().iter().filter_map(to_column_spec).collect();
-            columns.join(", ")
+        // Read the root file to get the current transaction ID and resolve
+        // the immutable snapshot we'll serve for this vtab's lifetime.
+        let root_file_path = data_path.join("root");
+        let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
+        let transaction_id = Id::from_hex(transaction_id_str.trim())?;
+        let transaction = source.get_transaction(&transaction_id)?;
+        let tab = source.get_table(&transaction, remote_table_name)?;
+        let total_rows = match &tab.root {
+            Some(root_id) => source.get_page(root_id, &tab.schema)?.row_count(),
+            None => 0,
         };
+
+        let column_spec: String = tab
+            .columns()
+            .iter()
+            .filter_map(to_column_spec)
+            .collect::<Vec<_>>()
+            .join(", ");
         let create_sql = format!("CREATE TABLE {local_table_name} ({column_spec});");
+
         let table = BeechTable {
             base: sqlite3_vtab::default(),
             remote_table_name: remote_table_name.to_string(),
             source: Arc::new(source),
             data_path,
+            meta: TableMeta {
+                table: tab,
+                total_rows,
+            },
         };
         Ok((create_sql, table))
     }
     fn do_best_index(&self, info: &mut IndexInfo) -> beech_core::Result<()> {
-        // Read the root file to get current transaction ID
-        let root_file_path = self.data_path.join("root");
-        let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
-        let transaction_id = Id::from_hex(transaction_id_str.trim())?;
-        let transaction = self.source.get_transaction(&transaction_id)?;
-        let table = self
-            .source
-            .get_table(&transaction, &self.remote_table_name)?;
-        let mut argv_index = 1;
-        let mut index_usage = beech_core::query::IndexUsage::new(table.id.clone());
+        let table = &self.meta.table;
 
-        for (constraint, mut usage) in info.constraints_and_usages() {
-            let should_use = index_usage.constraint(
-                &table,
-                constraint.column(),
-                from_sqlite_op(constraint.operator()),
-            );
-            if should_use {
-                usage.set_argv_index(argv_index);
-                argv_index += 1;
+        // Gather candidate constraints, dropping unsupported operators.
+        let candidates: Vec<CandidateConstraint> = info
+            .constraints_and_usages()
+            .filter_map(|(c, _)| {
+                from_sqlite_op(c.operator()).map(|op| CandidateConstraint {
+                    column: c.column(),
+                    op,
+                })
+            })
+            .collect();
+
+        let mut plan = AccessPlan::select(table, candidates.iter().copied(), self.meta.total_rows);
+
+        // ORDER BY consumption: the cursor walks leaves in ascending key
+        // order. If SQLite's requested ordering is a leading prefix of the
+        // key columns, all ascending, we can satisfy it for free.
+        plan.preserves_order = order_by_matches_key(info, table);
+        info.set_order_by_consumed(plan.preserves_order);
+
+        // Mark each consumed constraint with its argv slot and tell SQLite
+        // the cursor honors it (omit recheck).
+        for (sqlite_constraint, mut usage) in info.constraints_and_usages() {
+            let Some(op) = from_sqlite_op(sqlite_constraint.operator()) else {
+                continue;
+            };
+            let col = sqlite_constraint.column();
+            if let Some(slot) = plan.search.iter().find(|s| s.column == col && s.op == op) {
+                usage.set_argv_index(slot.argv_index);
+                usage.set_omit(true);
             }
         }
 
-        //convert 'constraints'to bytes using avro
-        let schema = IndexUsage::get_schema();
-        let mut writer = apache_avro::Writer::new(&schema, Vec::new());
-        writer.append_ser(&index_usage)?;
-        let bytes = writer.into_inner()?;
-        let idx_str = to_hex(&bytes);
+        info.set_estimated_cost(plan.estimate.estimated_cost);
+        info.set_estimated_rows(plan.estimate.estimated_rows);
 
-        info.set_idx_str(idx_str.as_str());
+        // Serialize plan to idx_str for the filter() side.
+        let schema = AccessPlan::get_schema();
+        let mut writer = apache_avro::Writer::new(&schema, Vec::new());
+        writer.append_ser(&plan)?;
+        let bytes = writer.into_inner()?;
+        info.set_idx_str(&to_hex(&bytes));
         Ok(())
     }
     fn do_open(&self) -> beech_core::Result<BeechCursor> {
-        // Read the root file to get current transaction ID
-        let root_file_path = self.data_path.join("root");
-        let transaction_id_str = std::fs::read_to_string(&root_file_path)?;
-        let transaction_id = Id::from_hex(transaction_id_str.trim())?;
-        let transaction = self.source.get_transaction(&transaction_id)?;
-        let table = self
-            .source
-            .get_table(&transaction, &self.remote_table_name)?;
-        let cursor = BeechCursor::new(&table, Arc::clone(&self.source));
+        let cursor = BeechCursor::new(&self.meta.table, Arc::clone(&self.source));
         Ok(cursor)
     }
 }
 
-fn from_sqlite_op(op: IndexConstraintOp) -> beech_core::query::ConstraintOp {
-    use IndexConstraintOp::*;
-    match op {
-        SQLITE_INDEX_CONSTRAINT_EQ => beech_core::query::ConstraintOp::Eq,
-        SQLITE_INDEX_CONSTRAINT_GT => beech_core::query::ConstraintOp::Gt,
-        SQLITE_INDEX_CONSTRAINT_LE => beech_core::query::ConstraintOp::Le,
-        SQLITE_INDEX_CONSTRAINT_LT => beech_core::query::ConstraintOp::Lt,
-        SQLITE_INDEX_CONSTRAINT_GE => beech_core::query::ConstraintOp::Ge,
-        _ => beech_core::query::ConstraintOp::Unknown,
+/// True iff SQLite's ORDER BY is satisfied by ascending key-part traversal.
+///
+/// The cursor walks leaves left-to-right, producing rows in ascending key
+/// order. We can consume the ORDER BY if:
+/// - it is empty (trivially satisfied), or
+/// - it lists a leading prefix of the key columns in key-part order, all
+///   ascending.
+///
+/// Anything DESC, any non-key column, or any reordering fails the check
+/// and SQLite will add its own sort.
+fn order_by_matches_key(info: &IndexInfo, table: &Table) -> bool {
+    let order = info.order_bys();
+    let mut seen = 0usize;
+    for ob in order {
+        if ob.is_order_by_desc() {
+            return false;
+        }
+        let col = ob.column();
+        let Some(part) = table.column_key_index(col as usize) else {
+            return false;
+        };
+        if part != seen {
+            return false;
+        }
+        seen += 1;
     }
+    true
+}
+
+fn from_sqlite_op(op: IndexConstraintOp) -> Option<ConstraintOp> {
+    use IndexConstraintOp::*;
+    Some(match op {
+        SQLITE_INDEX_CONSTRAINT_EQ => ConstraintOp::Eq,
+        SQLITE_INDEX_CONSTRAINT_GT => ConstraintOp::Gt,
+        SQLITE_INDEX_CONSTRAINT_LE => ConstraintOp::Le,
+        SQLITE_INDEX_CONSTRAINT_LT => ConstraintOp::Lt,
+        SQLITE_INDEX_CONSTRAINT_GE => ConstraintOp::Ge,
+        _ => return None,
+    })
 }
 
 unsafe impl<'vtab> VTab<'vtab> for BeechTable {
@@ -386,39 +444,52 @@ impl BeechCursor {
         maybe_idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> beech_core::Result<()> {
-        // Parse the index usage from the encoded string if provided by xBestIndex
-        let index_usage = if let Some(idx_str) = maybe_idx_str {
-            let bytes = from_hex(idx_str)?;
-            let schema = IndexUsage::get_schema();
-            let mut reader = apache_avro::Reader::with_schema(&schema, &bytes[..])?;
+        // Decode the AccessPlan produced by xBestIndex. xBestIndex always
+        // emits one (possibly empty) plan, so an absent idx_str is a bug.
+        let idx_str = maybe_idx_str.ok_or_else(|| {
+            SchemaError::Mismatch("xFilter called without an AccessPlan in idx_str".to_string())
+        })?;
+        let bytes = from_hex(idx_str)?;
+        let schema = AccessPlan::get_schema();
+        let mut reader = apache_avro::Reader::with_schema(&schema, &bytes[..])?;
+        let value = reader
+            .next()
+            .ok_or(WireError::Truncated)?
+            .map_err(WireError::from)?;
+        let plan: AccessPlan = apache_avro::from_value(&value)?;
 
-            if let Some(value_result) = reader.next() {
-                let value = value_result?;
-                apache_avro::from_value::<IndexUsage>(&value)?
-            } else {
-                return Err(WireError::Truncated.into());
-            }
-        } else {
-            IndexUsage::new(self.cursor.table.id.clone())
-        };
-
-        if index_usage.table_id != self.cursor.table.id {
+        if plan.table_id != self.cursor.table.id {
             return Err(
-                SchemaError::Mismatch("table id mismatch in IndexUsage".to_string()).into(),
+                SchemaError::Mismatch("table id mismatch in AccessPlan".to_string()).into(),
             );
         }
-        debug!("beech_filter(): schema matches");
+        debug!(
+            "beech_filter(): schema matches, {} search slots",
+            plan.search.len()
+        );
 
-        let mut values = vec![];
-        for (i, value_ref) in args.iter().enumerate() {
-            debug!("Converting constraint value {i}: {value_ref:?}");
-            let avro_value = avro_value_from_sqlite(value_ref)?;
+        // Build the cursor's (constraint, value) pairs from the plan in
+        // key-part order, pulling each value from the explicitly-specified
+        // argv slot rather than relying on iteration order.
+        let arg_refs: Vec<_> = args.iter().collect();
+        let mut constraints = Vec::with_capacity(plan.search.len());
+        let mut values = Vec::with_capacity(plan.search.len());
+        for slot in &plan.search {
+            let idx = slot.argv_index as usize - 1;
+            let value_ref = arg_refs.get(idx).ok_or_else(|| {
+                SchemaError::Mismatch(format!(
+                    "AccessPlan references argv_index {} but only {} args provided",
+                    slot.argv_index,
+                    arg_refs.len()
+                ))
+            })?;
+            let avro_value = avro_value_from_sqlite(*value_ref)?;
+            constraints.push(Constraint::new(slot.column, slot.op));
             values.push(avro_value);
         }
 
-        self.cursor.init(index_usage.constraints, values);
+        self.cursor.init(constraints, values);
         self.cursor.advance_to_left(&*self.source)?;
-
         Ok(())
     }
 }

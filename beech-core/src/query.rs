@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::vec::Vec;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AvroSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AvroSchema)]
 pub enum ConstraintOp {
     Eq,
     Gt,
@@ -399,39 +399,5 @@ impl Cursor {
                 first_constraints.iter().any(|(c, v)| c.after_end(v, kv))
             })
             .unwrap_or(false)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, AvroSchema)]
-pub struct IndexUsage {
-    pub table_id: Id,
-    pub constraints: Vec<Constraint>,
-}
-
-impl IndexUsage {
-    pub fn new(table_id: Id) -> Self {
-        IndexUsage {
-            table_id,
-            constraints: vec![],
-        }
-    }
-    pub fn constraint(&mut self, table: &Table, column: i32, op: ConstraintOp) -> bool {
-        if table.column_key_index(column as usize).is_some() {
-            self.constraints.push(Constraint {
-                column,
-                op,
-                has_index: true,
-            });
-            true
-        } else {
-            false
-        }
-    }
-    pub fn estimated_cost(&self) -> f64 {
-        if self.constraints.iter().any(|c| c.has_index) {
-            512.0
-        } else {
-            1024.0 * 1024.0 * 1024.0 * 1024.0
-        }
     }
 }

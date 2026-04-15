@@ -11,6 +11,7 @@ use beech_mem::mmap::MappedBuffer;
 use serde::{Deserialize, Serialize};
 
 pub mod error;
+pub mod plan;
 pub mod query;
 pub mod source;
 #[cfg(feature = "serde")]
