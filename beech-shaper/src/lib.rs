@@ -125,14 +125,5 @@ impl ProbShaper {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The CDF of the underlying LogNormal must increase with `elapsed`.
-    #[test]
-    fn probability_monotonic() {
-        let shaper = ProbShaper::new(1_000, 500);
-        assert!(shaper.dist.cdf(500.0) < shaper.dist.cdf(1_000.0));
-        assert!(shaper.dist.cdf(1_000.0) < shaper.dist.cdf(2_000.0));
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;

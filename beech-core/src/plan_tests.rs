@@ -142,3 +142,35 @@ fn estimates_form_a_gradient() {
     assert!(prefix_eq_plus_range.estimate.estimated_cost < prefix_eq.estimate.estimated_cost);
     assert!(prefix_eq.estimate.estimated_cost < full_scan.estimate.estimated_cost);
 }
+
+#[test]
+fn plan_round_trip_through_avro() {
+    use apache_avro::schema::AvroSchema;
+    use apache_avro::{from_avro_datum, to_avro_datum, to_value};
+
+    let table = table_with_keys("t", &["k0", "k1"], &["k0", "k1", "v"]);
+    let plan = AccessPlan::select(
+        &table,
+        [cc(0, ConstraintOp::Eq), cc(1, ConstraintOp::Gt)],
+        500_000,
+    );
+
+    let schema = AccessPlan::get_schema();
+    let encoded = to_avro_datum(&schema, to_value(&plan).unwrap()).unwrap();
+    let decoded_value = from_avro_datum(&schema, &mut std::io::Cursor::new(encoded), None).unwrap();
+    let decoded: AccessPlan = apache_avro::from_value(&decoded_value).unwrap();
+
+    assert_eq!(plan.table_id, decoded.table_id);
+    assert_eq!(plan.search.len(), decoded.search.len());
+    assert_eq!(plan.preserves_order, decoded.preserves_order);
+    assert_eq!(
+        plan.estimate.estimated_rows,
+        decoded.estimate.estimated_rows
+    );
+    for (a, b) in plan.search.iter().zip(decoded.search.iter()) {
+        assert_eq!(a.key_part, b.key_part);
+        assert_eq!(a.column, b.column);
+        assert_eq!(a.op, b.op);
+        assert_eq!(a.argv_index, b.argv_index);
+    }
+}

@@ -777,3 +777,7 @@ fn generate_transaction_id(prev_id: &Id, transaction_time: &SystemTime) -> Id {
     id_bytes.copy_from_slice(&hash_result[..]);
     Id::from(id_bytes)
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

@@ -401,3 +401,7 @@ impl Cursor {
             .unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+#[path = "query_tests.rs"]
+mod tests;

@@ -98,3 +98,7 @@ impl Drop for MappedBuffer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mmap_tests.rs"]
+mod tests;

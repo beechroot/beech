@@ -67,3 +67,7 @@ where
         self.current_size
     }
 }
+
+#[cfg(test)]
+#[path = "lru_tests.rs"]
+mod tests;

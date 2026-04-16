@@ -21,6 +21,10 @@ pub use error::{
     BeechError, DomainError, QueryError, Result, SchemaError, StorageError, WireError,
 };
 
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
+
 pub type Row = (i64, Vec<Value>); // TODO: Avro doesn't support unsigned 64-bit integers
 pub type Key = Vec<Value>;
 
