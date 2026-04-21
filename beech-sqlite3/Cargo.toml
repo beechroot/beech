@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rusqlite = { version = "0.37.0", features = ["vtab", "modern_sqlite"] }
+rusqlite = { version = "0.39", features = ["vtab", "modern_sqlite"] }
 beech-core = { path = "../beech-core" }
 beech-mem = { path = "../beech-mem" }
 beech-shaper = { path = "../beech-shaper" }
