@@ -234,6 +234,52 @@ fn apply_missing_update_errors() {
 }
 
 #[test]
+fn apply_append_at_end_matches_batch() {
+    // Key range 0..100; append key 200. Affects only the last leaf.
+    let seed: Vec<_> = (0..100).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(200)],
+        row_id: 200,
+        record: vec![Value::Int(200), Value::Int(200)],
+    })
+    .unwrap();
+
+    let mut final_rows = seed;
+    final_rows.push((200, int_record(200, 200)));
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
+fn apply_large_tree_single_update_matches_batch() {
+    // Large enough tree to have a multi-level structure; update one row
+    // in the middle. Exercises cascade through multiple levels.
+    let n = 1_000i64;
+    let seed: Vec<_> = (0..n).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Update {
+        key: vec![Value::Int(500)],
+        row_id: 500,
+        record: vec![Value::Int(500), Value::Int(9_999_999)],
+    })
+    .unwrap();
+
+    let mut final_rows: Vec<_> = (0..n).map(|i| int_row(i, i as i32)).collect();
+    final_rows[500] = (500, int_record(500, 9_999_999));
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
 fn apply_missing_delete_errors() {
     let seed: Vec<_> = (0..5).map(|i| int_row(i, i as i32)).collect();
     let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();

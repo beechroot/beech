@@ -119,27 +119,240 @@ impl<S: NodeSource> TransactionBuffer<S> {
 
     /// Apply one change, mutating the virtual tree in place.
     ///
-    /// Phase B implementation: collect all rows from the current virtual
-    /// tree, apply the change via a sorted merge, and rebuild the full
-    /// tree in memory. Correct but O(n) per change. Phase C will replace
-    /// this with local re-shape + cascade.
+    /// Strategy: navigate to the affected leaf, collect rows from the
+    /// affected leaf and every leaf to its right (i.e., all leaves whose
+    /// keys are >= the affected leaf's lowest key), apply the change to
+    /// that row list, re-shape into new leaves, and cascade upward
+    /// rebuilding each ancestor from its left-unchanged children plus
+    /// the new children from below.
+    ///
+    /// Correctness relies on a determinism property of `ProbShaper`:
+    /// feeding identical byte sequences through a fresh shaper always
+    /// produces the same split points. Left-unchanged children at every
+    /// level therefore carry the same Ids as in the original tree, and
+    /// the re-shape from the affected point rightward produces exactly
+    /// the same nodes a fresh batch build of the final row-set would.
     pub fn apply(&mut self, change: super::Change) -> Result<()> {
-        let mut rows = self.collect_all_rows()?;
+        if self.virtual_root.is_none() {
+            return self.apply_to_empty(change);
+        }
+        self.apply_incremental(change)
+    }
+
+    fn apply_to_empty(&mut self, change: super::Change) -> Result<()> {
+        match change {
+            super::Change::Insert {
+                key,
+                row_id,
+                record,
+            } => {
+                let row = RowRecord {
+                    key,
+                    row_id,
+                    values: record,
+                };
+                let leaves = self.build_leaves(vec![row])?;
+                let children: Vec<ChildSummary> = leaves
+                    .into_iter()
+                    .map(|l| ChildSummary {
+                        id: l.id,
+                        highest_key: l.highest_key,
+                        row_count: l.row_count,
+                        depth: 0,
+                    })
+                    .collect();
+                self.virtual_root = Some(self.finalize_root(children)?);
+                Ok(())
+            }
+            super::Change::Update { key, .. } | super::Change::Delete { key } => {
+                Err(DomainError::KeyNotFound { key }.into())
+            }
+        }
+    }
+
+    fn apply_incremental(&mut self, change: super::Change) -> Result<()> {
+        // Walk from virtual_root to the affected leaf, remembering each
+        // ancestor and the slot we descended through. At the leaf, we'll
+        // apply the change to the rows in the leaf (plus all rows to the
+        // right of it, collected by traversing right-side subtrees of
+        // every ancestor).
+        let path = self.locate(change.key())?;
+
+        // Collect rows: affected leaf's rows, then each ancestor's right-
+        // side subtrees in deepest-ancestor-first order (which gives rows
+        // in ascending key order).
+        let mut rows: Vec<RowRecord> = Vec::new();
+        match &*path.leaf_node {
+            Node::Leaf(leaf) => {
+                for entry in &leaf.entries {
+                    rows.push(RowRecord {
+                        key: entry.key(&self.table),
+                        row_id: entry.row.0,
+                        values: entry.row.1.clone(),
+                    });
+                }
+            }
+            Node::Internal(_) => {
+                return Err(beech_core::QueryError::UnexpectedNodeType {
+                    expected: "leaf",
+                    got: "branch",
+                }
+                .into());
+            }
+        }
+        for step in path.ancestors.iter().rev() {
+            if let Node::Internal(internal) = &*step.node {
+                for right_child_id in &internal.children[step.slot + 1..] {
+                    self.collect_rows_from(right_child_id, &mut rows)?;
+                }
+            }
+        }
+
+        // Apply the change to the row slice.
         apply_change_sorted(&mut rows, change)?;
-        self.rebuild_from_rows(rows)
-    }
 
-    /// Walk the current virtual tree (via self as a NodeSource, so the
-    /// overlay shows through) and collect every leaf row.
-    fn collect_all_rows(&self) -> Result<Vec<RowRecord>> {
-        let Some(root_id) = self.virtual_root.clone() else {
-            return Ok(Vec::new());
+        // Re-shape rows into new leaves. Empty result means this whole
+        // right-of-and-including-affected subtree is now empty.
+        let mut current_level: Vec<ChildSummary> = if rows.is_empty() {
+            Vec::new()
+        } else {
+            self.build_leaves(rows)?
+                .into_iter()
+                .map(|l| ChildSummary {
+                    id: l.id,
+                    highest_key: l.highest_key,
+                    row_count: l.row_count,
+                    depth: 0,
+                })
+                .collect()
         };
-        let mut out = Vec::new();
-        self.collect_rows_from(&root_id, &mut out)?;
-        Ok(out)
+
+        // Cascade upward. At each ancestor, left-unchanged children keep
+        // their original Ids; the right side (including affected) is
+        // replaced by `current_level`. Re-shape the combined list to
+        // produce the next level's child summaries.
+        for step in path.ancestors.iter().rev() {
+            let Node::Internal(internal) = &*step.node else {
+                return Err(beech_core::QueryError::UnexpectedNodeType {
+                    expected: "branch",
+                    got: "leaf",
+                }
+                .into());
+            };
+            // Left-unchanged children (slot 0..step.slot). Build their
+            // ChildSummary: id from internal.children[i], highest_key from
+            // internal.keys[i] (parent holds the highest_key of child i),
+            // row_count via subtree_row_count for internal nodes or leaf
+            // load for leaf nodes, depth from the subtree height.
+            let left_depth = internal.subtree_height as i32 - 1;
+            let mut combined = Vec::with_capacity(step.slot + current_level.len());
+            for i in 0..step.slot {
+                let child_id = internal.children[i].clone();
+                let highest_key = internal.keys[i].clone();
+                let row_count = self.row_count_of(&child_id)?;
+                combined.push(ChildSummary {
+                    id: child_id,
+                    highest_key,
+                    row_count,
+                    depth: left_depth,
+                });
+            }
+            combined.extend(current_level.drain(..));
+
+            current_level = if combined.is_empty() {
+                Vec::new()
+            } else {
+                self.build_one_branch_level(combined)?
+            };
+        }
+
+        // Determine the new virtual_root. If empty, tree is empty. If one
+        // element, it's the new root. If multiple, keep building branch
+        // levels until one remains.
+        self.virtual_root = match current_level.len() {
+            0 => None,
+            1 => Some(current_level.into_iter().next().expect("len 1").id),
+            _ => Some(self.finalize_root(current_level)?),
+        };
+        Ok(())
     }
 
+    /// Navigate from `virtual_root` to the leaf whose key range contains
+    /// `target`, recording every ancestor and the slot we descended
+    /// through. Panics if `virtual_root` is None (caller must handle).
+    fn locate(&self, target: &Key) -> Result<Path> {
+        let root_id = self
+            .virtual_root
+            .clone()
+            .expect("locate called on empty tree");
+        let mut ancestors = Vec::new();
+        let mut current_id = root_id;
+        loop {
+            let node = self.get_node(&current_id, &self.table.schema)?;
+            match &*node {
+                Node::Internal(internal) => {
+                    let slot = slot_for_key(&internal.keys, target);
+                    let child_id = internal.children[slot].clone();
+                    ancestors.push(PathStep {
+                        node: Arc::clone(&node),
+                        slot,
+                    });
+                    current_id = child_id;
+                }
+                Node::Leaf(_) => {
+                    return Ok(Path {
+                        ancestors,
+                        leaf_id: current_id,
+                        leaf_node: node,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Return the number of rows in the subtree rooted at `id`. For
+    /// internal nodes, uses subtree_row_count metadata. For leaves,
+    /// loads the leaf to count entries.
+    fn row_count_of(&self, id: &Id) -> Result<i64> {
+        let node = self.get_node(id, &self.table.schema)?;
+        Ok(node.row_count())
+    }
+
+    /// Build one branch level above the given children: feed each
+    /// child's highest_key through a fresh ProbShaper and split when
+    /// it fires, emitting new ChildSummary (branches) for the next
+    /// level up.
+    fn build_one_branch_level(&mut self, children: Vec<ChildSummary>) -> Result<Vec<ChildSummary>> {
+        let mut result: Vec<ChildSummary> = Vec::new();
+        let mut shaper = ProbShaper::new(self.target_node_size, self.node_size_stddev);
+        let mut batch: Vec<ChildSummary> = Vec::new();
+        for child in children {
+            let bytes = super::serialize_key_for_splitting(&child.highest_key)?;
+            batch.push(child);
+            if shaper.is_complete(&bytes) {
+                let parent = self.finish_branch(std::mem::take(&mut batch), &shaper);
+                result.push(parent);
+                shaper = ProbShaper::new(self.target_node_size, self.node_size_stddev);
+            }
+        }
+        if !batch.is_empty() {
+            let parent = self.finish_branch(batch, &shaper);
+            result.push(parent);
+        }
+        Ok(result)
+    }
+
+    /// Given a list of children at any depth, keep building branch
+    /// levels until exactly one remains; return its Id.
+    fn finalize_root(&mut self, mut children: Vec<ChildSummary>) -> Result<Id> {
+        while children.len() > 1 {
+            children = self.build_one_branch_level(children)?;
+        }
+        Ok(children.into_iter().next().expect("non-empty children").id)
+    }
+
+    /// Recursively collect every leaf row in the subtree rooted at `node_id`,
+    /// traversing through the overlay where present.
     fn collect_rows_from(&self, node_id: &Id, out: &mut Vec<RowRecord>) -> Result<()> {
         let node = self.get_node(node_id, &self.table.schema)?;
         match &*node {
@@ -158,20 +371,6 @@ impl<S: NodeSource> TransactionBuffer<S> {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Rebuild the tree in memory from a sorted row list, installing all
-    /// new nodes in the overlay and updating `virtual_root`.
-    fn rebuild_from_rows(&mut self, rows: Vec<RowRecord>) -> Result<()> {
-        if rows.is_empty() {
-            self.virtual_root = None;
-            return Ok(());
-        }
-
-        let leaves = self.build_leaves(rows)?;
-        let root_id = self.build_tree_from_leaves(leaves)?;
-        self.virtual_root = Some(root_id);
         Ok(())
     }
 
@@ -219,42 +418,6 @@ impl<S: NodeSource> TransactionBuffer<S> {
             highest_key,
             row_count,
         }
-    }
-
-    /// Build internal nodes level by level until a single root remains.
-    fn build_tree_from_leaves(&mut self, leaves: Vec<LeafSummary>) -> Result<Id> {
-        let mut current: Vec<ChildSummary> = leaves
-            .into_iter()
-            .map(|l| ChildSummary {
-                id: l.id,
-                highest_key: l.highest_key,
-                row_count: l.row_count,
-                depth: 0,
-            })
-            .collect();
-
-        while current.len() > 1 {
-            let mut next: Vec<ChildSummary> = Vec::new();
-            let mut shaper = ProbShaper::new(self.target_node_size, self.node_size_stddev);
-            let mut batch: Vec<ChildSummary> = Vec::new();
-
-            for child in current {
-                let bytes = super::serialize_key_for_splitting(&child.highest_key)?;
-                batch.push(child);
-                if shaper.is_complete(&bytes) {
-                    let parent = self.finish_branch(std::mem::take(&mut batch), &shaper);
-                    next.push(parent);
-                    shaper = ProbShaper::new(self.target_node_size, self.node_size_stddev);
-                }
-            }
-            if !batch.is_empty() {
-                let parent = self.finish_branch(batch, &shaper);
-                next.push(parent);
-            }
-            current = next;
-        }
-
-        Ok(current.into_iter().next().expect("non-empty tree").id)
     }
 
     fn finish_branch(&mut self, children: Vec<ChildSummary>, shaper: &ProbShaper) -> ChildSummary {
@@ -320,6 +483,35 @@ impl<S: NodeSource> TransactionBuffer<S> {
 }
 
 // --- Local helpers / types -------------------------------------------
+
+/// A traversal path from virtual_root to the leaf containing a given key.
+#[derive(Debug)]
+struct Path {
+    /// Internal nodes visited along the way, in root-to-leaf order. Each
+    /// `slot` is the child index we descended through at that node.
+    ancestors: Vec<PathStep>,
+    #[allow(dead_code)]
+    leaf_id: Id,
+    leaf_node: Arc<Node>,
+}
+
+#[derive(Debug)]
+struct PathStep {
+    node: Arc<Node>,
+    slot: usize,
+}
+
+/// Binary search over an InternalNode's `keys` (which are the highest_key
+/// of each child except the last) to find the child slot whose subtree
+/// contains `target`. Returns an index in `[0, children.len())`.
+fn slot_for_key(keys: &[Key], target: &Key) -> usize {
+    // keys[i] is children[i].highest_key for i in 0..keys.len().
+    // children.len() == keys.len() + 1. Target belongs in the first
+    // child whose highest_key >= target, defaulting to the last child
+    // when target exceeds every key.
+    keys.binary_search_by(|k| k.compare_key(target))
+        .unwrap_or_else(|i| i)
+}
 
 #[derive(Debug, Clone)]
 struct RowRecord {
