@@ -20,7 +20,7 @@ struct MyKey {
 }
 
 #[test]
-fn test_page_roundtrip() {
+fn test_node_roundtrip() {
     init_logger();
     let keys = vec![
         vec![Value::Int(1)],
@@ -43,14 +43,14 @@ fn test_page_roundtrip() {
         subtree_row_count: 3,
     });
 
-    for page in [leaf, branch] {
+    for node in [leaf, branch] {
         let schema = TableSchema {
             key_scheme: MyKey::get_schema(),
             row_scheme: MyRecord::get_schema(),
         };
-        let encoded = encode_page(&page, 9999.into(), &schema).unwrap();
-        let decoded = decode_page(&mut Cursor::new(encoded), &schema).unwrap();
-        assert_eq!(page, decoded);
+        let encoded = encode_node(&node, 9999.into(), &schema).unwrap();
+        let decoded = decode_node(&mut Cursor::new(encoded), &schema).unwrap();
+        assert_eq!(node, decoded);
     }
 }
 
@@ -74,7 +74,7 @@ fn test_table_roundtrip() {
 }
 
 #[test]
-fn decode_page_truncated_input_errors_cleanly() {
+fn decode_node_truncated_input_errors_cleanly() {
     let keys = vec![vec![Value::Int(1)], vec![Value::Int(2)]];
     let rows = vec![
         (100, vec![Value::Int(1), Value::Int(10)]),
@@ -88,17 +88,17 @@ fn decode_page_truncated_input_errors_cleanly() {
         key_scheme: MyKey::get_schema(),
         row_scheme: MyRecord::get_schema(),
     };
-    let encoded = encode_page(&leaf, 1i64.into(), &schema).unwrap();
+    let encoded = encode_node(&leaf, 1i64.into(), &schema).unwrap();
     // Lop off the back half of the payload and make sure decode errors
     // rather than panicking.
     let truncated = &encoded[..encoded.len() / 2];
     let mut reader = Cursor::new(truncated.to_vec());
-    let result = decode_page(&mut reader, &schema);
+    let result = decode_node(&mut reader, &schema);
     assert!(result.is_err(), "decoding truncated input should error");
 }
 
 #[test]
-fn decode_page_wrong_schema_errors_cleanly() {
+fn decode_node_wrong_schema_errors_cleanly() {
     let keys = vec![vec![Value::Int(1)]];
     let rows = vec![(100, vec![Value::Int(1), Value::Int(10)])];
     let leaf = Node::Leaf(LeafNode {
@@ -109,7 +109,7 @@ fn decode_page_wrong_schema_errors_cleanly() {
         key_scheme: MyKey::get_schema(),
         row_scheme: MyRecord::get_schema(),
     };
-    let encoded = encode_page(&leaf, 1i64.into(), &encode_schema).unwrap();
+    let encoded = encode_node(&leaf, 1i64.into(), &encode_schema).unwrap();
 
     // Decode with a row schema that has an extra string field — should not
     // panic; must return an error instead.
@@ -124,7 +124,7 @@ fn decode_page_wrong_schema_errors_cleanly() {
         row_scheme: OtherRecord::get_schema(),
     };
     let mut reader = Cursor::new(encoded);
-    let result = decode_page(&mut reader, &wrong_schema);
+    let result = decode_node(&mut reader, &wrong_schema);
     assert!(
         result.is_err(),
         "decoding with mismatched schema should error"

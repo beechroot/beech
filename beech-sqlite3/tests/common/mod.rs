@@ -5,7 +5,7 @@ use beech_write::{Writer, write_rows_to_prolly_tree};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// File-based Writer that puts pages into a flat directory.
+/// File-based Writer that puts nodes into a flat directory.
 pub struct FileWriter {
     dir: PathBuf,
     pending: Vec<(PathBuf, Vec<u8>)>,

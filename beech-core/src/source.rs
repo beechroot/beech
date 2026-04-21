@@ -2,7 +2,7 @@ use super::Result;
 use super::{
     BackingStore, DomainError, Id, Node, NodeSource, Root, StorageError, Table, TableSchema,
     Transaction,
-    wire::{decode_page, decode_root, decode_table, decode_transaction},
+    wire::{decode_node, decode_root, decode_table, decode_transaction},
 };
 use std::{io::Cursor, sync::Arc};
 
@@ -60,12 +60,12 @@ where
                 })?;
         self.get_table_by_id(table_id)
     }
-    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
-        let Some(page_bytes) = self.store.get(page_id)? else {
-            return Err(StorageError::key_not_found("page", page_id.clone()).into());
+    fn get_node(&self, node_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
+        let Some(page_bytes) = self.store.get(node_id)? else {
+            return Err(StorageError::key_not_found("node", node_id.clone()).into());
         };
         let mut reader = Cursor::new(&*page_bytes);
-        let page = decode_page(&mut reader, schema)?;
-        Ok(Arc::new(page))
+        let node = decode_node(&mut reader, schema)?;
+        Ok(Arc::new(node))
     }
 }

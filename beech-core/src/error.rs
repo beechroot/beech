@@ -82,8 +82,8 @@ pub enum QueryError {
     EmptyStack,
     #[error("child index out of bounds: index {index}, len {len}")]
     ChildIndexOutOfBounds { index: usize, len: usize },
-    #[error("unexpected page type: expected {expected}, got {got}")]
-    UnexpectedPageType {
+    #[error("unexpected node type: expected {expected}, got {got}")]
+    UnexpectedNodeType {
         expected: &'static str,
         got: &'static str,
     },

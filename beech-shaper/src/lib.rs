@@ -1,6 +1,6 @@
 //! ProbShaper — probabilistic completion helper
 //!
-//! Drives content-addressed page-splitting decisions from a stream of bytes.
+//! Drives content-addressed node-splitting decisions from a stream of bytes.
 //! Each `is_complete` call advances an internal SHA-256 state and a byte
 //! counter, then stochastically answers "should the current span end here?"
 //! according to a log-normal schedule that favors spans of length

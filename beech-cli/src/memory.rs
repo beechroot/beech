@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
-use beech_core::wire::{decode_page, decode_root, decode_table, decode_transaction};
+use beech_core::wire::{decode_node, decode_root, decode_table, decode_transaction};
 use beech_core::{
     DomainError, Id, Node, Result, Root, StorageError, Table, TableSchema, Transaction,
 };
@@ -82,10 +82,10 @@ impl beech_core::NodeSource for NodeSource {
         }
     }
 
-    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
-        let data = self.get_file_data(page_id)?;
+    fn get_node(&self, node_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
+        let data = self.get_file_data(node_id)?;
         let mut cursor = Cursor::new(data);
-        Ok(Arc::new(decode_page(&mut cursor, schema)?))
+        Ok(Arc::new(decode_node(&mut cursor, schema)?))
     }
 }
 

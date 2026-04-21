@@ -28,7 +28,7 @@ fn drain_row_ids(cursor: &mut Cursor, source: &MemoryNodeSource, table: &Table) 
             Some(c) => c.clone(),
             None => break,
         };
-        let node = source.get_page(&page_id, &table.schema).unwrap();
+        let node = source.get_node(&page_id, &table.schema).unwrap();
         let leaf = node.as_leaf().expect("cursor points at a leaf");
         let entry = leaf.entry(slot).expect("slot in range");
         out.push(entry.row_id());
@@ -121,7 +121,7 @@ fn cursor_composite_key_prefix_eq() {
 }
 
 #[test]
-fn cursor_advance_to_next_leaf_crosses_pages() {
+fn cursor_advance_to_next_leaf_crosses_nodes() {
     let (source, table) = build_int_table(500);
     let mut cursor = Cursor::new(&table);
     cursor.init(vec![], vec![]);

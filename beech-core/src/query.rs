@@ -189,8 +189,8 @@ impl Cursor {
             .map_or(Vec::new(), |r| vec![(r.clone(), 0)]);
     }
 
-    /// Advance cursor to the next leaf page
-    /// This is used when processing changes leaf by leaf
+    /// Advance cursor to the next leaf node.
+    /// This is used when processing changes leaf by leaf.
     pub fn advance_to_next_leaf(&mut self, source: &dyn NodeSource) -> Result<()> {
         // Move to the next position using existing logic
         self.advance_stack(source)?;
@@ -198,7 +198,7 @@ impl Cursor {
 
         // Check if we've moved beyond our constraints
         if let Some((id, slot)) = &self.stack.last() {
-            let p = source.get_page(id, &self.table.schema)?;
+            let p = source.get_node(id, &self.table.schema)?;
             if let Some(key) = p.keys().get(*slot) {
                 if self.done_iterating(key) {
                     self.stack.clear();
@@ -213,7 +213,7 @@ impl Cursor {
         loop {
             match self.stack.pop() {
                 Some((id, _)) => {
-                    let p = source.get_page(&id, &self.table.schema)?;
+                    let p = source.get_node(&id, &self.table.schema)?;
                     match &*p {
                         Node::Internal(internal) => {
                             let Some(last) = internal.len().checked_sub(1) else {
@@ -237,7 +237,7 @@ impl Cursor {
     }
     pub fn advance_to_left(&mut self, source: &dyn NodeSource) -> Result<()> {
         while let Some((id, slot)) = &self.stack.pop() {
-            let p = source.get_page(id, &self.table.schema)?;
+            let p = source.get_node(id, &self.table.schema)?;
             if let Some(new_slot) = self.find_next_slot(&p, *slot) {
                 self.stack.push((id.clone(), new_slot));
                 if let Node::Internal(internal) = &*p {
@@ -249,7 +249,7 @@ impl Cursor {
                     })?;
                     self.stack.push((new_child_id.clone(), 0));
                 } else {
-                    // We've reached a leaf page
+                    // We've reached a leaf node
                     break;
                 }
             } else {
@@ -290,7 +290,7 @@ impl Cursor {
             match &self.stack.pop() {
                 Some((id, slot)) => {
                     let (last_slot, new_lower_bound) = {
-                        let p = source.get_page(id, &self.table.schema)?;
+                        let p = source.get_node(id, &self.table.schema)?;
                         (p.last_slot_index(), p.keys().get(*slot).cloned())
                     };
                     self.lower_bound = new_lower_bound;
@@ -312,7 +312,7 @@ impl Cursor {
         self.advance_stack(source)?;
         self.advance_to_left(source)?;
         if let Some((id, slot)) = &self.stack.last() {
-            let p = source.get_page(id, &self.table.schema)?;
+            let p = source.get_node(id, &self.table.schema)?;
             if let Some(key) = p.keys().get(*slot) {
                 if self.done_iterating(key) {
                     self.stack.clear();

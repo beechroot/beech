@@ -4,7 +4,7 @@ use apache_avro::{
     Schema,
 };
 use beech_core::{
-    wire::{encode_page, encode_root, encode_table, encode_transaction, find_key_columns},
+    wire::{encode_node, encode_root, encode_table, encode_transaction, find_key_columns},
     DomainError, Id, InternalNode, Key, KeyOrdering, LeafEntry, LeafNode, Node, NodeSource,
     QueryError, Result, Root, SchemaError, Table, TableSchema, Transaction,
 };
@@ -17,7 +17,7 @@ use std::{
     time::SystemTime,
 };
 
-/// Transactional sink for page/table/transaction/root writes.
+/// Transactional sink for node/table/transaction/root writes.
 pub trait Writer {
     fn write<P>(&mut self, name: P, data: &[u8]) -> std::io::Result<()>
     where
@@ -28,10 +28,10 @@ pub trait Writer {
     fn num_to_commit(&self) -> usize;
 }
 
-/// Summary retained after a page has been built and written.
-/// Parents use this to assemble branch pages.
+/// Summary retained after a node has been built and written.
+/// Parents use this to assemble branch nodes.
 #[derive(Debug, Clone)]
-pub struct PageSummary {
+pub struct NodeSummary {
     pub id: Id,
     pub highest_key: Key,
     pub depth: i32,
@@ -72,9 +72,9 @@ struct RowRecord {
     values: Vec<Value>,
 }
 
-/// Internal representation of a page before/after write.
+/// Internal representation of a node before/after write.
 #[derive(Debug, Clone)]
-struct BuiltPage {
+struct BuiltNode {
     id: Id,
     node: Node,
     highest_key: Key,
@@ -82,9 +82,9 @@ struct BuiltPage {
     row_count: i64,
 }
 
-impl BuiltPage {
-    fn summary(&self) -> PageSummary {
-        PageSummary {
+impl BuiltNode {
+    fn summary(&self) -> NodeSummary {
+        NodeSummary {
             id: self.id.clone(),
             highest_key: self.highest_key.clone(),
             depth: self.depth,
@@ -104,8 +104,8 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     table_name: String,
     key_column_indices: Vec<usize>,
     rows: Vec<(i64, Value)>, // (row_id, record)
-    target_page_size: usize,
-    page_size_stddev: usize,
+    target_node_size: usize,
+    node_size_stddev: usize,
     prev_id: Option<Id>,
 ) -> Result<(Id, Id)> {
     if rows.is_empty() {
@@ -134,29 +134,29 @@ pub fn write_rows_to_prolly_tree<W: Writer>(
     row_records.sort_by(|a, b| a.key.compare_key(&b.key));
     reject_duplicate_keys(&row_records)?;
 
-    let root_page_id = build_and_write_tree(
+    let root_node_id = build_and_write_tree(
         writer,
         &schema,
         row_records,
-        target_page_size,
-        page_size_stddev,
+        target_node_size,
+        node_size_stddev,
     )?;
-    write_table_transaction_and_root(writer, table_name, schema, root_page_id, prev_id)
+    write_table_transaction_and_root(writer, table_name, schema, root_node_id, prev_id)
 }
 
 /// Apply sorted changes to an existing table and write a fresh tree.
 ///
 /// This implementation chooses correctness and clarity over incremental
 /// copy-on-write optimization: it reads all existing rows, merges the
-/// changes, and rebuilds the full tree through the same page-building
+/// changes, and rebuilds the full tree through the same node-building
 /// pipeline used by `write_rows_to_prolly_tree`.
 pub fn merge_changes<I, NS, W>(
     changes: std::iter::Peekable<I>,
     table: &Table,
     node_source: &NS,
     writer: &mut W,
-    target_page_size: usize,
-    page_size_stddev: usize,
+    target_node_size: usize,
+    node_size_stddev: usize,
 ) -> Result<Option<Id>>
 where
     I: Iterator<Item = Change>,
@@ -174,8 +174,8 @@ where
         writer,
         &table.schema,
         merged,
-        target_page_size,
-        page_size_stddev,
+        target_node_size,
+        node_size_stddev,
     )
 }
 
@@ -187,34 +187,34 @@ fn build_and_write_tree<W: Writer>(
     writer: &mut W,
     schema: &TableSchema,
     rows: Vec<RowRecord>,
-    target_page_size: usize,
-    page_size_stddev: usize,
+    target_node_size: usize,
+    node_size_stddev: usize,
 ) -> Result<Option<Id>> {
     if rows.is_empty() {
         return Ok(None);
     }
 
     let leaf_summaries =
-        build_and_write_leaf_pages(writer, schema, rows, target_page_size, page_size_stddev)?;
+        build_and_write_leaf_nodes(writer, schema, rows, target_node_size, node_size_stddev)?;
 
     build_and_write_branch_levels(
         writer,
         schema,
         leaf_summaries,
-        target_page_size,
-        page_size_stddev,
+        target_node_size,
+        node_size_stddev,
     )
 }
 
-fn build_and_write_leaf_pages<W: Writer>(
+fn build_and_write_leaf_nodes<W: Writer>(
     writer: &mut W,
     schema: &TableSchema,
     rows: Vec<RowRecord>,
-    target_page_size: usize,
-    page_size_stddev: usize,
-) -> Result<Vec<PageSummary>> {
+    target_node_size: usize,
+    node_size_stddev: usize,
+) -> Result<Vec<NodeSummary>> {
     let mut summaries = Vec::new();
-    let mut shaper = ProbShaper::new(target_page_size, page_size_stddev);
+    let mut shaper = ProbShaper::new(target_node_size, node_size_stddev);
     let mut batch: Vec<RowRecord> = Vec::new();
 
     for row in rows {
@@ -223,15 +223,15 @@ fn build_and_write_leaf_pages<W: Writer>(
 
         if shaper.is_complete(&row_bytes) {
             let built = build_leaf_page(std::mem::take(&mut batch), &shaper)?;
-            let summary = write_built_page(writer, schema, built)?;
+            let summary = write_built_node(writer, schema, built)?;
             summaries.push(summary);
-            shaper = ProbShaper::new(target_page_size, page_size_stddev);
+            shaper = ProbShaper::new(target_node_size, node_size_stddev);
         }
     }
 
     if !batch.is_empty() {
         let built = build_leaf_page(batch, &shaper)?;
-        let summary = write_built_page(writer, schema, built)?;
+        let summary = write_built_node(writer, schema, built)?;
         summaries.push(summary);
     }
 
@@ -241,9 +241,9 @@ fn build_and_write_leaf_pages<W: Writer>(
 fn build_and_write_branch_levels<W: Writer>(
     writer: &mut W,
     schema: &TableSchema,
-    mut current_level: Vec<PageSummary>,
-    target_page_size: usize,
-    page_size_stddev: usize,
+    mut current_level: Vec<NodeSummary>,
+    target_node_size: usize,
+    node_size_stddev: usize,
 ) -> Result<Option<Id>> {
     if current_level.is_empty() {
         return Ok(None);
@@ -251,8 +251,8 @@ fn build_and_write_branch_levels<W: Writer>(
 
     while current_level.len() > 1 {
         let mut next_level = Vec::new();
-        let mut shaper = ProbShaper::new(target_page_size, page_size_stddev);
-        let mut batch: Vec<PageSummary> = Vec::new();
+        let mut shaper = ProbShaper::new(target_node_size, node_size_stddev);
+        let mut batch: Vec<NodeSummary> = Vec::new();
 
         for child in current_level {
             let split_bytes = serialize_key_for_splitting(&child.highest_key)?;
@@ -260,15 +260,15 @@ fn build_and_write_branch_levels<W: Writer>(
 
             if shaper.is_complete(&split_bytes) {
                 let built = build_branch_page(std::mem::take(&mut batch), &shaper)?;
-                let summary = write_built_page(writer, schema, built)?;
+                let summary = write_built_node(writer, schema, built)?;
                 next_level.push(summary);
-                shaper = ProbShaper::new(target_page_size, page_size_stddev);
+                shaper = ProbShaper::new(target_node_size, node_size_stddev);
             }
         }
 
         if !batch.is_empty() {
             let built = build_branch_page(batch, &shaper)?;
-            let summary = write_built_page(writer, schema, built)?;
+            let summary = write_built_node(writer, schema, built)?;
             next_level.push(summary);
         }
 
@@ -278,10 +278,10 @@ fn build_and_write_branch_levels<W: Writer>(
     Ok(Some(current_level.remove(0).id))
 }
 
-fn build_leaf_page(rows: Vec<RowRecord>, shaper: &ProbShaper) -> Result<BuiltPage> {
+fn build_leaf_page(rows: Vec<RowRecord>, shaper: &ProbShaper) -> Result<BuiltNode> {
     if rows.is_empty() {
         return Err(
-            DomainError::InvalidArgs("leaf page requires at least one row".to_string()).into(),
+            DomainError::InvalidArgs("leaf node requires at least one row".to_string()).into(),
         );
     }
 
@@ -291,7 +291,7 @@ fn build_leaf_page(rows: Vec<RowRecord>, shaper: &ProbShaper) -> Result<BuiltPag
     let highest_key = keys
         .last()
         .cloned()
-        .ok_or_else(|| QueryError::Malformed("leaf page had no highest key"))?;
+        .ok_or_else(|| QueryError::Malformed("leaf node had no highest key"))?;
 
     let entries: Vec<LeafEntry> = rows
         .into_iter()
@@ -304,7 +304,7 @@ fn build_leaf_page(rows: Vec<RowRecord>, shaper: &ProbShaper) -> Result<BuiltPag
 
     let node = Node::Leaf(LeafNode { keys, entries });
 
-    Ok(BuiltPage {
+    Ok(BuiltNode {
         id,
         node,
         highest_key,
@@ -313,10 +313,10 @@ fn build_leaf_page(rows: Vec<RowRecord>, shaper: &ProbShaper) -> Result<BuiltPag
     })
 }
 
-fn build_branch_page(children: Vec<PageSummary>, shaper: &ProbShaper) -> Result<BuiltPage> {
+fn build_branch_page(children: Vec<NodeSummary>, shaper: &ProbShaper) -> Result<BuiltNode> {
     if children.is_empty() {
         return Err(DomainError::InvalidArgs(
-            "branch page requires at least one child".to_string(),
+            "branch node requires at least one child".to_string(),
         )
         .into());
     }
@@ -326,7 +326,7 @@ fn build_branch_page(children: Vec<PageSummary>, shaper: &ProbShaper) -> Result<
     let highest_key = children
         .last()
         .map(|c| c.highest_key.clone())
-        .ok_or_else(|| QueryError::Malformed("branch page had no highest key"))?;
+        .ok_or_else(|| QueryError::Malformed("branch node had no highest key"))?;
 
     let depth = children[0].depth + 1;
     let row_count: i64 = children.iter().map(|c| c.row_count).sum();
@@ -348,7 +348,7 @@ fn build_branch_page(children: Vec<PageSummary>, shaper: &ProbShaper) -> Result<
         subtree_row_count: row_count as u64,
     });
 
-    Ok(BuiltPage {
+    Ok(BuiltNode {
         id,
         node,
         highest_key,
@@ -357,14 +357,14 @@ fn build_branch_page(children: Vec<PageSummary>, shaper: &ProbShaper) -> Result<
     })
 }
 
-fn write_built_page<W: Writer>(
+fn write_built_node<W: Writer>(
     writer: &mut W,
     schema: &TableSchema,
-    page: BuiltPage,
-) -> Result<PageSummary> {
-    let bytes = encode_page(&page.node, page.id.clone(), schema)?;
-    writer.write(file_name(&page.id), &bytes)?;
-    Ok(page.summary())
+    built: BuiltNode,
+) -> Result<NodeSummary> {
+    let bytes = encode_node(&built.node, built.id.clone(), schema)?;
+    writer.write(file_name(&built.id), &bytes)?;
+    Ok(built.summary())
 }
 
 // =============================================================================
@@ -380,12 +380,12 @@ fn collect_existing_rows<NS: NodeSource>(
     };
 
     let mut rows = Vec::new();
-    collect_rows_from_page(root_id, &table.schema, table, node_source, &mut rows)?;
+    collect_rows_from_node(root_id, &table.schema, table, node_source, &mut rows)?;
     Ok(rows)
 }
 
-fn collect_rows_from_page<NS: NodeSource>(
-    page_id: &Id,
+fn collect_rows_from_node<NS: NodeSource>(
+    node_id: &Id,
     schema: &TableSchema,
     table: &Table,
     node_source: &NS,
@@ -394,9 +394,9 @@ fn collect_rows_from_page<NS: NodeSource>(
 where
     NS: NodeSource,
 {
-    let page = node_source.get_page(page_id, schema)?;
+    let node = node_source.get_node(node_id, schema)?;
 
-    match &*page {
+    match &*node {
         Node::Leaf(leaf) => {
             for entry in &leaf.entries {
                 out.push(RowRecord {
@@ -408,7 +408,7 @@ where
         }
         Node::Internal(branch) => {
             for child_id in &branch.children {
-                collect_rows_from_page(child_id, schema, table, node_source, out)?;
+                collect_rows_from_node(child_id, schema, table, node_source, out)?;
             }
         }
     }
@@ -525,11 +525,11 @@ fn write_table_transaction_and_root<W: Writer>(
     writer: &mut W,
     table_name: String,
     schema: TableSchema,
-    root_page_id: Option<Id>,
+    root_node_id: Option<Id>,
     prev_id: Option<Id>,
 ) -> Result<(Id, Id)> {
-    let table_id = generate_table_id(root_page_id.as_ref(), &table_name);
-    let table = Table::new(table_id.clone(), table_name.clone(), root_page_id, schema)?;
+    let table_id = generate_table_id(root_node_id.as_ref(), &table_name);
+    let table = Table::new(table_id.clone(), table_name.clone(), root_node_id, schema)?;
     let table_bytes = encode_table(
         &table,
         SystemTime::now()
@@ -748,10 +748,10 @@ fn file_name(id: &Id) -> String {
     format!("{id}.bch")
 }
 
-fn generate_table_id(root_page_id: Option<&Id>, table_name: &str) -> Id {
+fn generate_table_id(root_node_id: Option<&Id>, table_name: &str) -> Id {
     let mut hasher = Sha256::new();
 
-    if let Some(root_id) = root_page_id {
+    if let Some(root_id) = root_node_id {
         hasher.update(root_id.as_bytes());
     }
     hasher.update(table_name.as_bytes());

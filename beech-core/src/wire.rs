@@ -34,7 +34,7 @@ pub struct WireTable {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default, AvroSchema)]
-struct WirePage {
+struct WireNode {
     pub id: Id,
     #[serde(with = "serde_bytes")]
     pub keys: Vec<u8>,
@@ -50,15 +50,15 @@ fn is_record_scheme(schema: &Schema) -> bool {
     matches!(schema, Schema::Record(_))
 }
 
-fn wire_page_schema() -> Result<Schema> {
+fn wire_node_schema() -> Result<Schema> {
     // TODO: at some point, let's vendor int the Avro stuff,
     // so that we can control the output of AvroSchema.
     // otherwise mayebe we can convice the upstream maintainers
     // to add a flag to control type better.
 
-    let Schema::Record(mut record) = WirePage::get_schema() else {
+    let Schema::Record(mut record) = WireNode::get_schema() else {
         return Err(
-            SchemaError::Mismatch("WirePage derived schema is not a record".to_string()).into(),
+            SchemaError::Mismatch("WireNode derived schema is not a record".to_string()).into(),
         );
     };
     // the default schema for the fields "keys" and "rows" is not "bytes",
@@ -145,36 +145,36 @@ fn encode_record_array<W: Write>(
     writer.write_all(&bytes)?;
     Ok(())
 }
-pub fn encode_page(page: &Node, id: Id, schema: &TableSchema) -> Result<Vec<u8>> {
+pub fn encode_node(node: &Node, id: Id, schema: &TableSchema) -> Result<Vec<u8>> {
     assert!(is_record_scheme(&schema.key_scheme));
     assert!(is_record_scheme(&schema.row_scheme));
-    let mut wp = WirePage::default();
-    wp.id = id;
-    match page {
+    let mut wn = WireNode::default();
+    wn.id = id;
+    match node {
         Node::Internal(internal) => {
-            wp.children = internal.children.to_vec();
-            wp.depth = internal.subtree_height as i32;
-            wp.row_count = internal.subtree_row_count as i64;
+            wn.children = internal.children.to_vec();
+            wn.depth = internal.subtree_height as i32;
+            wn.row_count = internal.subtree_row_count as i64;
             let mut writer = Vec::new();
             encode_record_array(&mut writer, &schema.key_scheme, &internal.keys)?;
-            wp.keys = writer;
+            wn.keys = writer;
         }
         Node::Leaf(leaf) => {
-            wp.depth = 0;
-            wp.row_count = leaf.entries.len() as i64;
+            wn.depth = 0;
+            wn.row_count = leaf.entries.len() as i64;
             let (rowids, rows): (Vec<_>, Vec<_>) = leaf
                 .entries
                 .iter()
                 .map(|e| (e.row.0, e.row.1.clone()))
                 .unzip();
-            wp.rowids = rowids;
+            wn.rowids = rowids;
             let mut writer = Vec::new();
             encode_record_array(&mut writer, &schema.row_scheme, &rows)?;
-            wp.rows = writer;
+            wn.rows = writer;
         }
     }
 
-    let bytes = to_avro_datum(&wire_page_schema()?, to_value(wp)?)?;
+    let bytes = to_avro_datum(&wire_node_schema()?, to_value(wn)?)?;
     Ok(bytes)
 }
 
@@ -213,13 +213,13 @@ fn decode_record_array(scheme: &Schema, data: &[u8]) -> Result<Vec<Vec<Value>>> 
         .collect()
 }
 
-pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Node> {
-    let wp_value = from_avro_datum(&wire_page_schema()?, reader, None)?;
-    let wp: WirePage = from_value(&wp_value)?;
-    let is_leaf = wp.children.is_empty();
+pub fn decode_node<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Node> {
+    let wn_value = from_avro_datum(&wire_node_schema()?, reader, None)?;
+    let wn: WireNode = from_value(&wn_value)?;
+    let is_leaf = wn.children.is_empty();
     if is_leaf {
-        let rows = decode_record_array(&schema.row_scheme, &wp.rows[..])?;
-        if rows.len() != wp.rowids.len() {
+        let rows = decode_record_array(&schema.row_scheme, &wn.rows[..])?;
+        if rows.len() != wn.rowids.len() {
             return Err(WireError::Malformed("leaf rows/rowids length mismatch").into());
         }
         let key_columns: Vec<usize> = find_key_columns(schema)?;
@@ -227,7 +227,7 @@ pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Node
             .iter()
             .map(|row| key_from_row(&key_columns, row))
             .collect();
-        let entries: Vec<LeafEntry> = wp
+        let entries: Vec<LeafEntry> = wn
             .rowids
             .into_iter()
             .zip(rows)
@@ -237,15 +237,15 @@ pub fn decode_page<R: Read>(reader: &mut R, schema: &TableSchema) -> Result<Node
             .collect();
         Ok(Node::Leaf(LeafNode { keys, entries }))
     } else {
-        let keys: Vec<Vec<_>> = decode_record_array(&schema.key_scheme, &wp.keys[..])?;
-        if keys.len() + 1 != wp.children.len() {
+        let keys: Vec<Vec<_>> = decode_record_array(&schema.key_scheme, &wn.keys[..])?;
+        if keys.len() + 1 != wn.children.len() {
             return Err(WireError::Malformed("branch keys/children length mismatch").into());
         }
         Ok(Node::Internal(InternalNode {
             keys,
-            children: wp.children,
-            subtree_height: wp.depth as u32,
-            subtree_row_count: wp.row_count as u64,
+            children: wn.children,
+            subtree_height: wn.depth as u32,
+            subtree_row_count: wn.row_count as u64,
         }))
     }
 }

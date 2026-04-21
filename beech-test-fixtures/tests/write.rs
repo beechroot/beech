@@ -22,7 +22,7 @@ fn collect_row_ids(source: &MemoryNodeSource, table: &Table) -> Vec<i64> {
     cursor.advance_to_left(source).unwrap();
     let mut out = Vec::new();
     while let Some((pid, slot)) = cursor.current().cloned() {
-        let node = source.get_page(&pid, &table.schema).unwrap();
+        let node = source.get_node(&pid, &table.schema).unwrap();
         let leaf = node.as_leaf().unwrap();
         out.push(leaf.entry(slot).unwrap().row_id());
         cursor.next(source).unwrap();
@@ -36,7 +36,7 @@ fn collect_pairs(source: &MemoryNodeSource, table: &Table) -> Vec<(i64, i32, i32
     cursor.advance_to_left(source).unwrap();
     let mut out = Vec::new();
     while let Some((pid, slot)) = cursor.current().cloned() {
-        let node = source.get_page(&pid, &table.schema).unwrap();
+        let node = source.get_node(&pid, &table.schema).unwrap();
         let leaf = node.as_leaf().unwrap();
         let entry = leaf.entry(slot).unwrap();
         let row_id = entry.row_id();
@@ -70,7 +70,7 @@ fn write_single_row_yields_single_leaf() {
     let rows = vec![int_row(0, 7)];
     let (_store, source, table) = build_simple_table("t", rows, vec![0], 64, 16).unwrap();
     let root_id = table.root.as_ref().expect("root should exist").clone();
-    let node = source.get_page(&root_id, &table.schema).unwrap();
+    let node = source.get_node(&root_id, &table.schema).unwrap();
     assert!(node.is_leaf(), "single-row tree root should be a leaf");
     assert_eq!(node.len(), 1);
 }
@@ -80,7 +80,7 @@ fn write_many_rows_grows_to_multiple_levels() {
     let rows: Vec<_> = (0..2000).map(|i| int_row(i, (i % 100) as i32)).collect();
     let (_store, source, table) = build_simple_table("t", rows, vec![0], 64, 16).unwrap();
     let root_id = table.root.as_ref().unwrap().clone();
-    let root = source.get_page(&root_id, &table.schema).unwrap();
+    let root = source.get_node(&root_id, &table.schema).unwrap();
     assert!(root.is_internal(), "large tree root should be internal");
     assert!(root.depth() >= 1);
     let ids = collect_row_ids(&source, &table);

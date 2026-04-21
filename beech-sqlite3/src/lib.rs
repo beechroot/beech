@@ -44,7 +44,7 @@ struct BeechTable {
     source: Arc<dyn NodeSource>,
     data_path: PathBuf,
     /// Snapshot of the table and total row count, captured at connect
-    /// time. Safe to hold for the vtab's lifetime: pages, tables, and
+    /// time. Safe to hold for the vtab's lifetime: nodes, tables, and
     /// transactions are content-addressed and immutable; only the root
     /// file is mutable. A vtab that snapshots at connect keeps serving
     /// that snapshot until reopened.
@@ -187,7 +187,7 @@ impl BeechTable {
         let transaction = source.get_transaction(&transaction_id)?;
         let tab = source.get_table(&transaction, remote_table_name)?;
         let total_rows = match &tab.root {
-            Some(root_id) => source.get_page(root_id, &tab.schema)?.row_count(),
+            Some(root_id) => source.get_node(root_id, &tab.schema)?.row_count(),
             None => 0,
         };
 
@@ -417,10 +417,10 @@ impl BeechCursor {
     }
 
     fn get_current_row(&self) -> beech_core::Result<Option<Vec<apache_avro::types::Value>>> {
-        if let Some((page_id, row_idx)) = self.cursor.current() {
-            let page = self.source.get_page(page_id, &self.cursor.table.schema)?;
+        if let Some((node_id, row_idx)) = self.cursor.current() {
+            let node = self.source.get_node(node_id, &self.cursor.table.schema)?;
 
-            match &*page {
+            match &*node {
                 beech_core::Node::Leaf(leaf) => {
                     if let Some(entry) = leaf.entry(*row_idx) {
                         Ok(Some(entry.values().to_vec()))
@@ -428,7 +428,7 @@ impl BeechCursor {
                         Ok(None)
                     }
                 }
-                beech_core::Node::Internal(_) => Err(QueryError::UnexpectedPageType {
+                beech_core::Node::Internal(_) => Err(QueryError::UnexpectedNodeType {
                     expected: "leaf",
                     got: "branch",
                 }
@@ -540,14 +540,14 @@ unsafe impl VTabCursor for BeechCursor {
         }
     }
     fn rowid(&self) -> Result<i64> {
-        let Some((page_id, row_idx)) = self.cursor.current() else {
+        let Some((node_id, row_idx)) = self.cursor.current() else {
             return Ok(0);
         };
-        let page = self
+        let node = self
             .source
-            .get_page(page_id, &self.cursor.table.schema)
+            .get_node(node_id, &self.cursor.table.schema)
             .map_err(into_rusqlite_error)?;
-        match &*page {
+        match &*node {
             beech_core::Node::Leaf(leaf) => {
                 let entry = leaf.entry(*row_idx).ok_or_else(|| {
                     into_rusqlite_error(
@@ -561,7 +561,7 @@ unsafe impl VTabCursor for BeechCursor {
                 Ok(entry.row_id())
             }
             beech_core::Node::Internal(_) => Err(into_rusqlite_error(
-                QueryError::UnexpectedPageType {
+                QueryError::UnexpectedNodeType {
                     expected: "leaf",
                     got: "branch",
                 }

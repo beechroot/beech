@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use apache_avro::types::Value;
-use beech_core::wire::{decode_page, decode_root, decode_table, decode_transaction};
+use beech_core::wire::{decode_node, decode_root, decode_table, decode_transaction};
 use beech_core::{
     DomainError, Id, Node, NodeSource, Result, Root, StorageError, Table, TableSchema, Transaction,
 };
@@ -142,10 +142,10 @@ impl beech_core::NodeSource for MemoryNodeSource {
         }
     }
 
-    fn get_page(&self, page_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
-        let data = self.get_file_data(page_id)?;
+    fn get_node(&self, node_id: &Id, schema: &TableSchema) -> Result<Arc<Node>> {
+        let data = self.get_file_data(node_id)?;
         let mut cursor = Cursor::new(data);
-        Ok(Arc::new(decode_page(&mut cursor, schema)?))
+        Ok(Arc::new(decode_node(&mut cursor, schema)?))
     }
 }
 
@@ -156,13 +156,13 @@ impl beech_core::NodeSource for MemoryNodeSource {
 /// other code that wants a built table to read against.
 ///
 /// `key_columns` lists row-column indices that participate in the key.
-/// `target_page_size` controls the prolly-tree split target.
+/// `target_node_size` controls the prolly-tree split target.
 pub fn build_simple_table(
     table_name: &str,
     rows: Vec<(i64, Value)>,
     key_columns: Vec<usize>,
-    target_page_size: usize,
-    page_size_stddev: usize,
+    target_node_size: usize,
+    node_size_stddev: usize,
 ) -> Result<(MemoryStore, MemoryNodeSource, Arc<Table>)> {
     let store = MemoryStore::new();
     let mut writer = store.writer();
@@ -171,8 +171,8 @@ pub fn build_simple_table(
         table_name.to_string(),
         key_columns,
         rows,
-        target_page_size,
-        page_size_stddev,
+        target_node_size,
+        node_size_stddev,
         None,
     )?;
     // Persist the root pointer just like beech-cli's load_csv does.

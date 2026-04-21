@@ -1,5 +1,5 @@
 use apache_avro::{types::Value, Schema};
-use beech_core::{Id, Key, Node, NodeSource};
+use beech_core::{Id, Node, NodeSource};
 use beech_write::{infer_row_schema_from_record, write_rows_to_prolly_tree, Writer};
 use clap::Parser;
 #[cfg(test)]
@@ -8,18 +8,10 @@ use log::info;
 use serde::Serialize;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
-struct PageMetadata {
-    id: Id,
-    highest_key: Key,
-    depth: i32,
-    row_count: i64,
-}
-
 #[derive(Debug, Serialize)]
-struct PageInspection {
-    page_id: String,
-    page_type: String,
+struct NodeInspection {
+    node_id: String,
+    node_type: String,
     num_keys: usize,
     num_rows: Option<usize>,
     children: Option<Vec<String>>,
@@ -32,7 +24,7 @@ struct TableInfo {
     id: String,
     columns: usize,
     key_columns: usize,
-    root_page: Option<String>,
+    root_node: Option<String>,
     tree_depth: i32,
     total_rows: i64,
 }
@@ -86,13 +78,13 @@ enum Commands {
         #[arg(short, long, default_value = "0")]
         key_columns: KeyColumns,
 
-        /// Target page size in bytes
+        /// Target node size in bytes
         #[arg(long, default_value = "1000")]
-        target_page_size: usize,
+        target_node_size: usize,
 
-        /// Standard deviation for probabilistic page splitting
+        /// Standard deviation for probabilistic node splitting
         #[arg(long, default_value = "100")]
-        page_size_stddev: usize,
+        node_size_stddev: usize,
 
         /// Whether CSV has headers
         #[arg(long, default_value = "true")]
@@ -108,14 +100,14 @@ enum Commands {
         #[arg(short, long, default_value = "/tmp")]
         data_dir: PathBuf,
     },
-    /// Inspect a specific page file and show its metadata in JSON format
+    /// Inspect a specific node file and show its metadata in JSON format
     Inspect {
         /// Directory containing .bch files
         #[arg(short, long)]
         data_dir: Option<PathBuf>,
 
-        /// Page ID to inspect (32-byte hex string) or full path to .bch file
-        page_id_or_path: String,
+        /// Node ID to inspect (32-byte hex string) or full path to .bch file
+        node_id_or_path: String,
     },
 }
 
@@ -129,8 +121,8 @@ fn main() -> anyhow::Result<()> {
             output_dir,
             table_name,
             key_columns,
-            target_page_size,
-            page_size_stddev,
+            target_node_size,
+            node_size_stddev,
             has_headers,
             mode,
         } => load_csv_command(
@@ -138,16 +130,16 @@ fn main() -> anyhow::Result<()> {
             output_dir,
             table_name,
             key_columns,
-            target_page_size,
-            page_size_stddev,
+            target_node_size,
+            node_size_stddev,
             has_headers,
             mode,
         ),
         Commands::Info { data_dir } => info_command(data_dir),
         Commands::Inspect {
             data_dir,
-            page_id_or_path,
-        } => inspect_command(data_dir, page_id_or_path),
+            node_id_or_path,
+        } => inspect_command(data_dir, node_id_or_path),
     }
 }
 
@@ -156,8 +148,8 @@ fn load_csv_command(
     output_dir: PathBuf,
     table_name: String,
     key_columns: KeyColumns,
-    target_page_size: usize,
-    page_size_stddev: usize,
+    target_node_size: usize,
+    node_size_stddev: usize,
     has_headers: bool,
     mode: LoadMode,
 ) -> anyhow::Result<()> {
@@ -184,8 +176,8 @@ fn load_csv_command(
                 table_name,
                 key_column_indices,
                 records,
-                target_page_size,
-                page_size_stddev,
+                target_node_size,
+                node_size_stddev,
             )?;
         }
         LoadMode::Insert => {
@@ -201,8 +193,8 @@ fn replace_mode_load(
     table_name: String,
     key_column_indices: Vec<usize>,
     records: Vec<(i64, Value)>,
-    target_page_size: usize,
-    page_size_stddev: usize,
+    target_node_size: usize,
+    node_size_stddev: usize,
 ) -> anyhow::Result<()> {
     // Create writer
     let mut writer = txio::Writer::new(output_dir.clone());
@@ -213,8 +205,8 @@ fn replace_mode_load(
         table_name,
         key_column_indices,
         records.clone(),
-        target_page_size,
-        page_size_stddev,
+        target_node_size,
+        node_size_stddev,
         None, // For the first transaction, no previous transaction
     )?;
 
@@ -270,13 +262,9 @@ fn info_command(data_dir: PathBuf) -> anyhow::Result<()> {
     for (table_name, table_id) in &transaction.tables {
         let table = node_source.get_table(&transaction, table_name)?;
 
-        let (root_page, tree_depth, total_rows) = if let Some(root_id) = &table.root {
-            let root_page = node_source.get_page(root_id, &table.schema)?;
-            (
-                Some(root_id.to_string()),
-                root_page.depth(),
-                root_page.row_count(),
-            )
+        let (root_node, tree_depth, total_rows) = if let Some(root_id) = &table.root {
+            let root = node_source.get_node(root_id, &table.schema)?;
+            (Some(root_id.to_string()), root.depth(), root.row_count())
         } else {
             (None, 0, 0)
         };
@@ -286,7 +274,7 @@ fn info_command(data_dir: PathBuf) -> anyhow::Result<()> {
             id: table_id.to_string(),
             columns: table.columns().len(),
             key_columns: table.key_columns.len(),
-            root_page,
+            root_node,
             tree_depth,
             total_rows,
         });
@@ -321,39 +309,39 @@ fn info_command(data_dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow::Result<()> {
+fn inspect_command(data_dir: Option<PathBuf>, node_id_or_path: String) -> anyhow::Result<()> {
     use beech_core::{source::LocalFile, NodeSource};
     use std::path::Path;
 
-    // Determine if input is a file path or just a page ID
-    let (data_dir, page_id) = if page_id_or_path.contains('/') && page_id_or_path.ends_with(".bch")
+    // Determine if input is a file path or just a node ID
+    let (data_dir, node_id) = if node_id_or_path.contains('/') && node_id_or_path.ends_with(".bch")
     {
-        // Input is a file path - extract directory and page ID
-        let path = Path::new(&page_id_or_path);
+        // Input is a file path - extract directory and node ID
+        let path = Path::new(&node_id_or_path);
         let directory = path
             .parent()
             .ok_or_else(|| {
-                anyhow::anyhow!("Cannot determine directory from path: {}", page_id_or_path)
+                anyhow::anyhow!("Cannot determine directory from path: {}", node_id_or_path)
             })?
             .to_path_buf();
 
         let file_stem = path
             .file_stem()
             .ok_or_else(|| {
-                anyhow::anyhow!("Cannot extract filename from path: {}", page_id_or_path)
+                anyhow::anyhow!("Cannot extract filename from path: {}", node_id_or_path)
             })?
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid filename encoding: {}", page_id_or_path))?;
+            .ok_or_else(|| anyhow::anyhow!("Invalid filename encoding: {}", node_id_or_path))?;
 
         (directory, file_stem.to_string())
     } else {
-        // Input is just a page ID - use provided or default directory
+        // Input is just a node ID - use provided or default directory
         let dir = data_dir.unwrap_or_else(|| PathBuf::from("/tmp"));
-        (dir, page_id_or_path)
+        (dir, node_id_or_path)
     };
 
-    // Parse the page ID from hex string
-    let page_id = Id::from_hex(&page_id)?;
+    // Parse the node ID from hex string
+    let node_id = Id::from_hex(&node_id)?;
 
     // Read the root file to get the current transaction ID
     let root_file_path = data_dir.join("root");
@@ -383,22 +371,22 @@ fn inspect_command(data_dir: Option<PathBuf>, page_id_or_path: String) -> anyhow
 
     let table = node_source.get_table(&transaction, table_name)?;
 
-    // Get the page
-    let page = node_source.get_page(&page_id, &table.schema)?;
+    // Get the node
+    let node = node_source.get_node(&node_id, &table.schema)?;
 
     // Create the inspection structure
-    let inspection = match &*page {
-        Node::Leaf(leaf) => PageInspection {
-            page_id: page_id.to_string(),
-            page_type: "leaf".to_string(),
+    let inspection = match &*node {
+        Node::Leaf(leaf) => NodeInspection {
+            node_id: node_id.to_string(),
+            node_type: "leaf".to_string(),
             num_keys: leaf.keys.len(),
             num_rows: Some(leaf.len()),
             children: None,
             keys: leaf.keys.iter().map(|k| format!("{:?}", k)).collect(),
         },
-        Node::Internal(internal) => PageInspection {
-            page_id: page_id.to_string(),
-            page_type: "branch".to_string(),
+        Node::Internal(internal) => NodeInspection {
+            node_id: node_id.to_string(),
+            node_type: "branch".to_string(),
             num_keys: internal.keys.len(),
             num_rows: None,
             children: Some(internal.children.iter().map(|id| id.to_string()).collect()),
@@ -543,11 +531,11 @@ mod tests {
         let transaction = node_source.get_transaction(&transaction_id).unwrap();
         let table = node_source.get_table(&transaction, "test_table").unwrap();
 
-        // Test by directly accessing the leaf page (simpler approach)
+        // Test by directly accessing the leaf node (simpler approach)
         let mut retrieved_rows = Vec::new();
         if let Some(root_id) = &table.root {
-            let page = node_source.get_page(root_id, &table.schema).unwrap();
-            if let Node::Leaf(leaf) = page.as_ref() {
+            let node = node_source.get_node(root_id, &table.schema).unwrap();
+            if let Node::Leaf(leaf) = node.as_ref() {
                 for entry in &leaf.entries {
                     let row_values = entry.values();
                     let record = Value::Record(vec![
@@ -635,14 +623,14 @@ mod tests {
             test_rows.push((i, record(vec![int_field("value", i)])));
         }
 
-        // Write to memory with moderate page size to target 4 levels
+        // Write to memory with moderate node size to target 4 levels
         let mut writer = memory::Writer::new();
         let (transaction_id, _table_id) = write_rows_to_prolly_tree(
             &mut writer,
             "large_table".to_string(),
             vec![0], // Key on "value" column
             test_rows.clone(),
-            300, // Smaller target page size to get 4 levels
+            300, // Smaller target node size to get 4 levels
             60,  // Smaller stddev
             None,
         )
@@ -657,7 +645,7 @@ mod tests {
         let mut cursor = Cursor::new(&table);
         cursor.init(vec![], vec![]); // No constraints = unbounded
 
-        // Navigate to the first leaf page
+        // Navigate to the first leaf node
         cursor.advance_to_left(&node_source).unwrap();
 
         // Test tree depth - expecting 3 levels with improved splitting algorithm
@@ -668,39 +656,39 @@ mod tests {
             "Expected 3-level tree, got depth {tree_depth}"
         );
 
-        // Test root page metadata - cursor depth 3 means root page depth 2 (since leaves are depth 0)
-        if let Some(root_page_id) = &table.root {
-            let root_page = node_source.get_page(root_page_id, &table.schema).unwrap();
+        // Test root node metadata - cursor depth 3 means root node depth 2 (since leaves are depth 0)
+        if let Some(root_node_id) = &table.root {
+            let root_node = node_source.get_node(root_node_id, &table.schema).unwrap();
             let expected_root_depth = (tree_depth - 1) as i32; // Root depth = cursor depth - 1
             assert_eq!(
-                root_page.depth(),
+                root_node.depth(),
                 expected_root_depth,
-                "Root page should have depth {}, got {}",
+                "Root node should have depth {}, got {}",
                 expected_root_depth,
-                root_page.depth()
+                root_node.depth()
             );
             assert_eq!(
-                root_page.row_count(),
+                root_node.row_count(),
                 num_rows,
-                "Root page should have row_count {}, got {}",
+                "Root node should have row_count {}, got {}",
                 num_rows,
-                root_page.row_count()
+                root_node.row_count()
             );
             debug!(
-                "Root page metadata: depth={}, row_count={}",
-                root_page.depth(),
-                root_page.row_count()
+                "Root node metadata: depth={}, row_count={}",
+                root_node.depth(),
+                root_node.row_count()
             );
         } else {
-            panic!("Expected table to have a root page");
+            panic!("Expected table to have a root node");
         }
 
         let mut count = 0;
         while !cursor.eof() {
-            let (page_id, row_index) = cursor.current().unwrap();
-            let page = node_source.get_page(page_id, &table.schema).unwrap();
-            let Node::Leaf(leaf) = page.as_ref() else {
-                panic!("Expected leaf page, got branch page");
+            let (node_id, row_index) = cursor.current().unwrap();
+            let node = node_source.get_node(node_id, &table.schema).unwrap();
+            let Node::Leaf(leaf) = node.as_ref() else {
+                panic!("Expected leaf node, got branch node");
             };
             let entry = leaf.entry(*row_index).unwrap();
             let row_id = entry.row_id();
@@ -733,10 +721,10 @@ mod tests {
 
             // Verify the first row matches our constraint
             assert!(!bounded_cursor.eof(), "Bounded cursor should not be at EOF");
-            let (page_id, row_index) = bounded_cursor.current().unwrap();
-            let page = node_source.get_page(page_id, &table.schema).unwrap();
-            let Node::Leaf(leaf) = page.as_ref() else {
-                panic!("Expected leaf page, got branch page");
+            let (node_id, row_index) = bounded_cursor.current().unwrap();
+            let node = node_source.get_node(node_id, &table.schema).unwrap();
+            let Node::Leaf(leaf) = node.as_ref() else {
+                panic!("Expected leaf node, got branch node");
             };
             let entry = leaf.entry(*row_index).unwrap();
             let row_id = entry.row_id();

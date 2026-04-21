@@ -171,8 +171,7 @@ pub enum Node {
 pub struct InternalNode {
     /// Separator keys for navigation.
     ///
-    /// Current semantics preserved from your existing `Page::Branch`:
-    /// one key slot per child slot in traversal code.
+    /// One key slot per child slot in traversal code.
     pub keys: Vec<Key>,
     pub children: Vec<Id>,
 
@@ -559,7 +558,7 @@ pub trait NodeSource {
     fn get_root(&self) -> Result<Arc<Root>>;
     fn get_transaction(&self, transaction_id: &Id) -> Result<Arc<Transaction>>;
     fn get_table(&self, transaction: &Transaction, table_name: &str) -> Result<Arc<Table>>;
-    fn get_page(&self, node_id: &Id, schema: &TableSchema) -> Result<Arc<Node>>;
+    fn get_node(&self, node_id: &Id, schema: &TableSchema) -> Result<Arc<Node>>;
 }
 
 pub trait BackingStore<K> {
