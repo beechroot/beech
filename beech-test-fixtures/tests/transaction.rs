@@ -1,0 +1,252 @@
+//! TransactionBuffer tests.
+//!
+//! Correctness bar: applying a sequence of Changes to a TransactionBuffer
+//! must produce the same virtual_root Id as a fresh batch build of the
+//! same final row-set (prolly-canonical invariant).
+
+use apache_avro::types::Value;
+use beech_test_fixtures::{build_simple_table, MemoryStore};
+use beech_write::transaction::TransactionBuffer;
+use beech_write::{write_rows_to_prolly_tree, Change};
+
+fn int_record(k: i32, v: i32) -> Value {
+    Value::Record(vec![
+        ("k".to_string(), Value::Int(k)),
+        ("v".to_string(), Value::Int(v)),
+    ])
+}
+
+fn int_row(i: i64, v: i32) -> (i64, Value) {
+    (i, int_record(i as i32, v))
+}
+
+const TARGET: usize = 64;
+const STDDEV: usize = 16;
+
+/// Build the tree that `rows` would produce via a fresh batch build,
+/// and return its root-node Id.
+fn batch_root(rows: Vec<(i64, Value)>) -> beech_core::Id {
+    let store = MemoryStore::new();
+    let mut writer = store.writer();
+    write_rows_to_prolly_tree(
+        &mut writer,
+        "t".to_string(),
+        vec![0],
+        rows,
+        TARGET,
+        STDDEV,
+        None,
+    )
+    .unwrap();
+    // read-back via the store to get the table and its root
+    use beech_core::NodeSource;
+    let source = store.node_source();
+    let root = source.get_root().unwrap();
+    let txn = source.get_transaction(&root.id).unwrap();
+    let table = source.get_table(&txn, "t").unwrap();
+    table.root.clone().expect("non-empty tree")
+}
+
+#[test]
+fn apply_insert_matches_batch() {
+    // Seed the tree with 0..10. Then via TransactionBuffer, insert a new
+    // row with key 100. The virtual_root should equal the batch-built
+    // root of 0..10 plus the extra row.
+    let seed: Vec<_> = (0..10).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(100)],
+        row_id: 100,
+        record: vec![Value::Int(100), Value::Int(900)],
+    })
+    .unwrap();
+
+    let mut final_rows = seed;
+    final_rows.push((100, int_record(100, 900)));
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
+fn apply_update_matches_batch() {
+    let seed: Vec<_> = (0..10).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Update {
+        key: vec![Value::Int(5)],
+        row_id: 5,
+        record: vec![Value::Int(5), Value::Int(7777)],
+    })
+    .unwrap();
+
+    let mut final_rows: Vec<_> = (0..10).map(|i| int_row(i, i as i32)).collect();
+    final_rows[5] = (5, int_record(5, 7777));
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
+fn apply_delete_matches_batch() {
+    let seed: Vec<_> = (0..10).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Delete {
+        key: vec![Value::Int(3)],
+    })
+    .unwrap();
+
+    let final_rows: Vec<_> = (0..10)
+        .filter(|i| *i != 3)
+        .map(|i| int_row(i, i as i32))
+        .collect();
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
+fn apply_many_inserts_matches_batch() {
+    // Seed with 0,2,4,...,198 (evens); insert all odds 1,3,...,199 via
+    // TransactionBuffer. Final tree should equal batch build of 0..200.
+    let seed: Vec<_> = (0..200).step_by(2).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    for i in (1..200).step_by(2) {
+        buf.apply(Change::Insert {
+            key: vec![Value::Int(i as i32)],
+            row_id: i,
+            record: vec![Value::Int(i as i32), Value::Int(i as i32)],
+        })
+        .unwrap();
+    }
+
+    let final_rows: Vec<_> = (0..200).map(|i| int_row(i, i as i32)).collect();
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
+fn apply_interleaved_matches_batch() {
+    let seed: Vec<_> = (0..50).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(100)],
+        row_id: 100,
+        record: vec![Value::Int(100), Value::Int(0)],
+    })
+    .unwrap();
+    buf.apply(Change::Update {
+        key: vec![Value::Int(10)],
+        row_id: 10,
+        record: vec![Value::Int(10), Value::Int(999)],
+    })
+    .unwrap();
+    buf.apply(Change::Delete {
+        key: vec![Value::Int(20)],
+    })
+    .unwrap();
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(-5)],
+        row_id: 200,
+        record: vec![Value::Int(-5), Value::Int(-5)],
+    })
+    .unwrap();
+
+    let mut final_rows: Vec<_> = (0..50).map(|i| int_row(i, i as i32)).collect();
+    final_rows[10] = (10, int_record(10, 999));
+    final_rows.retain(|(r, _)| *r != 20);
+    final_rows.push((100, int_record(100, 0)));
+    final_rows.push((200, int_record(-5, -5)));
+    let expected = batch_root(final_rows);
+    assert_eq!(buf.virtual_root(), Some(&expected));
+}
+
+#[test]
+fn apply_full_delete_returns_empty_root() {
+    let seed: Vec<_> = (0..5).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    for i in 0..5 {
+        buf.apply(Change::Delete {
+            key: vec![Value::Int(i)],
+        })
+        .unwrap();
+    }
+    assert_eq!(buf.virtual_root(), None);
+}
+
+#[test]
+fn apply_duplicate_insert_errors() {
+    let seed: Vec<_> = (0..5).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    let err = buf
+        .apply(Change::Insert {
+            key: vec![Value::Int(2)],
+            row_id: 99,
+            record: vec![Value::Int(2), Value::Int(999)],
+        })
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        beech_core::BeechError::Domain(beech_core::DomainError::DuplicateKey { .. })
+    ));
+}
+
+#[test]
+fn apply_missing_update_errors() {
+    let seed: Vec<_> = (0..5).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    let err = buf
+        .apply(Change::Update {
+            key: vec![Value::Int(99)],
+            row_id: 99,
+            record: vec![Value::Int(99), Value::Int(0)],
+        })
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        beech_core::BeechError::Domain(beech_core::DomainError::KeyNotFound { .. })
+    ));
+}
+
+#[test]
+fn apply_missing_delete_errors() {
+    let seed: Vec<_> = (0..5).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();
+    drop(store);
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    let err = buf
+        .apply(Change::Delete {
+            key: vec![Value::Int(99)],
+        })
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        beech_core::BeechError::Domain(beech_core::DomainError::KeyNotFound { .. })
+    ));
+}

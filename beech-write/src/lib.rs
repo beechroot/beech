@@ -1,3 +1,5 @@
+pub mod transaction;
+
 use apache_avro::{
     schema::{Name, RecordField},
     types::Value,
@@ -679,7 +681,7 @@ fn key_from_row_values(key_columns: &[usize], row: &[Value]) -> Key {
 // Stable split serialization helpers
 // =============================================================================
 
-fn serialize_row_for_splitting(row_values: &[Value]) -> Result<Vec<u8>> {
+pub(crate) fn serialize_row_for_splitting(row_values: &[Value]) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     for value in row_values {
         encode_value_for_split(value, &mut bytes)?;
@@ -687,7 +689,7 @@ fn serialize_row_for_splitting(row_values: &[Value]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn serialize_key_for_splitting(key: &Key) -> Result<Vec<u8>> {
+pub(crate) fn serialize_key_for_splitting(key: &Key) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     for value in key {
         encode_value_for_split(value, &mut bytes)?;
