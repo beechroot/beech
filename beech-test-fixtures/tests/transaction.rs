@@ -280,6 +280,114 @@ fn apply_large_tree_single_update_matches_batch() {
 }
 
 #[test]
+fn commit_writes_nodes_readable_by_new_source() {
+    // Seed, open a TransactionBuffer against the seeded store, apply a
+    // change, commit through the writer backed by the same store, and
+    // read the virtual_root through the store's NodeSource — we should
+    // reach the modified leaf without the overlay being involved.
+    let seed: Vec<_> = (0..40).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+
+    let mut buf = TransactionBuffer::new(source, table.clone(), TARGET, STDDEV);
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(100)],
+        row_id: 100,
+        record: vec![Value::Int(100), Value::Int(9999)],
+    })
+    .unwrap();
+    let expected_root = buf.virtual_root().cloned().expect("non-empty");
+
+    // Writer backed by the same store so committed nodes become visible
+    // through the node_source.
+    let mut writer = store.writer();
+    let new_root = buf.commit(&mut writer).unwrap();
+    assert_eq!(new_root, Some(expected_root.clone()));
+
+    // Reach the new root through the bare (no-overlay) node_source.
+    let source2 = store.node_source();
+    use beech_core::NodeSource;
+    let node = source2.get_node(&expected_root, &table.schema).unwrap();
+    // subtree_row_count should be 41 (40 seed + 1 new)
+    assert_eq!(node.row_count(), 41);
+}
+
+#[test]
+fn commit_roundtrip_matches_batch() {
+    // Full pipeline: seed → TransactionBuffer → apply changes → commit →
+    // re-read tree → compare walked row set to batch build of final rows.
+    let seed: Vec<_> = (0..30).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) =
+        build_simple_table("t", seed.clone(), vec![0], TARGET, STDDEV).unwrap();
+
+    let mut buf = TransactionBuffer::new(source, table.clone(), TARGET, STDDEV);
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(500)],
+        row_id: 500,
+        record: vec![Value::Int(500), Value::Int(500)],
+    })
+    .unwrap();
+    buf.apply(Change::Delete {
+        key: vec![Value::Int(15)],
+    })
+    .unwrap();
+    buf.apply(Change::Update {
+        key: vec![Value::Int(7)],
+        row_id: 7,
+        record: vec![Value::Int(7), Value::Int(777)],
+    })
+    .unwrap();
+
+    let mut writer = store.writer();
+    let new_root = buf.commit(&mut writer).unwrap().expect("non-empty");
+
+    // Independently compute the expected root.
+    let mut final_rows = seed;
+    final_rows[7] = (7, int_record(7, 777));
+    final_rows.retain(|(r, _)| *r != 15);
+    final_rows.push((500, int_record(500, 500)));
+    let expected = batch_root(final_rows);
+    assert_eq!(new_root, expected);
+}
+
+#[test]
+fn commit_empty_tree_returns_none_root() {
+    let seed: Vec<_> = (0..3).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    for i in 0..3 {
+        buf.apply(Change::Delete {
+            key: vec![Value::Int(i)],
+        })
+        .unwrap();
+    }
+    let mut writer = store.writer();
+    let new_root = buf.commit(&mut writer).unwrap();
+    assert_eq!(new_root, None);
+}
+
+#[test]
+fn rollback_does_not_write() {
+    let seed: Vec<_> = (0..10).map(|i| int_row(i, i as i32)).collect();
+    let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();
+    let seed_file_count = store.file_count();
+
+    let mut buf = TransactionBuffer::new(source, table, TARGET, STDDEV);
+    buf.apply(Change::Insert {
+        key: vec![Value::Int(99)],
+        row_id: 99,
+        record: vec![Value::Int(99), Value::Int(99)],
+    })
+    .unwrap();
+    buf.rollback();
+
+    // Dropping the buffer without commit means the store file count is
+    // unchanged — no .bch files leaked.
+    assert_eq!(store.file_count(), seed_file_count);
+}
+
+#[test]
 fn apply_missing_delete_errors() {
     let seed: Vec<_> = (0..5).map(|i| int_row(i, i as i32)).collect();
     let (store, source, table) = build_simple_table("t", seed, vec![0], TARGET, STDDEV).unwrap();

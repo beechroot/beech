@@ -12,6 +12,7 @@
 //!   to what a fresh batch rebuild of the same final row-set would
 //!   produce (prolly-canonical invariant).
 
+use beech_core::wire::encode_node;
 use beech_core::{
     DomainError, Id, InternalNode, Key, KeyOrdering, LeafEntry, LeafNode, Node, NodeSource, Result,
     Root, Table, TableSchema, Transaction,
@@ -469,11 +470,26 @@ impl<S: NodeSource> TransactionBuffer<S> {
         &self.table
     }
 
-    /// Serialize every overlay node to the writer. Does NOT write the
-    /// Table/Transaction/root files; that's the caller's job using the
-    /// returned virtual_root id.
-    pub fn commit<W: super::Writer>(self, _writer: &mut W) -> Result<Option<Id>> {
-        unimplemented!("Phase D")
+    /// Serialize every overlay node through the writer and return the
+    /// final virtual_root id. Does NOT write the Table/Transaction/root
+    /// files; the caller finalizes those using the returned id (or
+    /// `None` for an empty tree).
+    ///
+    /// Each node is encoded under its content-addressed Id via the same
+    /// wire format used by `write_rows_to_prolly_tree`, so the on-disk
+    /// result is byte-equal to a fresh batch build of the final row set.
+    pub fn commit<W: super::Writer>(self, writer: &mut W) -> Result<Option<Id>> {
+        let Self {
+            overlay,
+            virtual_root,
+            table,
+            ..
+        } = self;
+        for (id, node) in overlay {
+            let bytes = encode_node(&node, id.clone(), &table.schema)?;
+            writer.write(format!("{id}.bch"), &bytes)?;
+        }
+        Ok(virtual_root)
     }
 
     /// Discard the overlay without writing anything.
